@@ -22,10 +22,14 @@ WebSocket-Event-Protokoll:
   {"type": "error",       "message": "..."}
 """
 
+import asyncio
 import json
 import logging
 import re
-from typing import Any, AsyncGenerator, Dict, List, Optional
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict, List, Optional
+
+# Callback-Typ: (tool_name, arguments) -> bool (True = ausführen)
+ConfirmFn = Callable[[str, Dict[str, Any]], Awaitable[bool]]
 
 from providers.base import BaseProvider, ChatMessage
 from tools.base import BaseTool, ToolInfo
@@ -187,6 +191,8 @@ class ToolCaller:
         provider: BaseProvider,
         model: str,
         system_prompt: Optional[str] = None,
+        stop_event: Optional[asyncio.Event] = None,
+        confirm: Optional[ConfirmFn] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Führt einen vollständigen Chat-Turn durch inkl. Tool-Calling-Schleife.
@@ -194,15 +200,61 @@ class ToolCaller:
         Zwei Pfade:
         - Nativ: Provider unterstützt Function-Calling → Tools als API-Parameter
         - XML:   Fallback → Tool-Beschreibungen in System-Prompt injizieren
+
+        stop_event: gesetzt → Generierung wird abgebrochen, Teilantwort gespeichert.
+        confirm:    wird vor Ausführung bestätigungspflichtiger Tools aufgerufen.
         """
         use_native = provider.supports_native_tools() and bool(self.tools)
 
         if use_native:
-            async for event in self._run_native(conversation, provider, model, system_prompt):
+            async for event in self._run_native(
+                conversation, provider, model, system_prompt, stop_event, confirm
+            ):
                 yield event
         else:
-            async for event in self._run_xml(conversation, provider, model, system_prompt):
+            async for event in self._run_xml(
+                conversation, provider, model, system_prompt, stop_event, confirm
+            ):
                 yield event
+
+    async def _execute_call(
+        self,
+        tool_name: str,
+        tool_args: Dict[str, Any],
+        confirm: Optional[ConfirmFn],
+    ):
+        """
+        Führt einen einzelnen Tool-Aufruf aus. Yieldet die Events
+        (tool_start/tool_end) und gibt am Ende (result, executed) zurück.
+        Bei Bestätigungspflicht wird vorher confirm() befragt.
+        """
+        tool = self.tools.get(tool_name)
+        if tool is None:
+            yield {"type": "tool_start", "name": tool_name, "arguments": tool_args}
+            result = f"Unbekanntes Tool: {tool_name}"
+            logger.warning(result)
+            yield {"type": "tool_end", "name": tool_name, "result": result}
+            yield ("__result__", result)
+            return
+
+        # Bestätigung einholen falls nötig
+        if getattr(tool, "requires_confirmation", False) and confirm is not None:
+            approved = await confirm(tool_name, tool_args)
+            if not approved:
+                yield {"type": "tool_start", "name": tool_name, "arguments": tool_args}
+                result = "Der Nutzer hat die Ausführung dieses Tools abgelehnt."
+                yield {"type": "tool_end", "name": tool_name, "result": "❌ Abgelehnt"}
+                yield ("__result__", result)
+                return
+
+        yield {"type": "tool_start", "name": tool_name, "arguments": tool_args}
+        try:
+            result = await tool.execute(tool_args)
+        except Exception as e:
+            result = f"Fehler bei Tool {tool_name}: {str(e)}"
+            logger.error(result)
+        yield {"type": "tool_end", "name": tool_name, "result": result}
+        yield ("__result__", result)
 
     async def _run_native(
         self,
@@ -210,6 +262,8 @@ class ToolCaller:
         provider: BaseProvider,
         model: str,
         system_prompt: Optional[str],
+        stop_event: Optional[asyncio.Event] = None,
+        confirm: Optional[ConfirmFn] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         Natives Tool-Calling: Tools werden als API-Parameter übergeben.
@@ -238,11 +292,16 @@ class ToolCaller:
 
             full_response = ""
             detected_native_calls: List[Dict[str, Any]] = []
+            stopped = False
 
             try:
                 async for token in provider.chat(
                     messages, model=model, system_prompt=full_system, tools=native_tools
                 ):
+                    if stop_event is not None and stop_event.is_set():
+                        stopped = True
+                        break
+
                     # Natives Tool-Call Signal (JSON-kodierter Sentinel-Dict)
                     try:
                         signal = json.loads(token)
@@ -267,6 +326,11 @@ class ToolCaller:
                 yield {"type": "error", "message": f"Modell-Fehler: {str(e)}"}
                 return
 
+            # Abbruch durch Nutzer → Teilantwort als fertig speichern
+            if stopped:
+                yield {"type": "done", "tool_calls": all_tool_calls}
+                return
+
             if not detected_native_calls:
                 yield {"type": "done", "tool_calls": all_tool_calls}
                 return
@@ -283,31 +347,18 @@ class ToolCaller:
                 "tool_calls": assistant_tool_calls_ollama,
             })
 
-            # Tools ausführen und Ergebnisse als role:tool zurückgeben
+            # Tools ausführen (mit optionaler Bestätigung) und Ergebnisse zurückgeben
             for call in detected_native_calls:
                 tool_name = call["name"]
                 tool_args = _sanitize_tool_args(call["arguments"])
-
-                yield {"type": "tool_start", "name": tool_name, "arguments": tool_args}
-
-                tool = self.tools.get(tool_name)
-                if tool is None:
-                    result = f"Unbekanntes Tool: {tool_name}"
-                    logger.warning(result)
-                else:
-                    try:
-                        result = await tool.execute(tool_args)
-                    except Exception as e:
-                        result = f"Fehler bei Tool {tool_name}: {str(e)}"
-                        logger.error(result)
-
-                yield {"type": "tool_end", "name": tool_name, "result": result}
+                result = ""
+                async for ev in self._execute_call(tool_name, tool_args, confirm):
+                    if isinstance(ev, tuple) and ev[0] == "__result__":
+                        result = ev[1]
+                    else:
+                        yield ev
                 all_tool_calls.append({**call, "result": result})
-
-                current_conversation.append({
-                    "role": "tool",
-                    "content": str(result),
-                })
+                current_conversation.append({"role": "tool", "content": str(result)})
 
         logger.warning(f"Maximale Tool-Iterations-Grenze ({MAX_TOOL_ITERATIONS}) erreicht")
         yield {"type": "error", "message": f"Maximale Tool-Aufrufe ({MAX_TOOL_ITERATIONS}) erreicht."}
@@ -318,6 +369,8 @@ class ToolCaller:
         provider: BaseProvider,
         model: str,
         system_prompt: Optional[str],
+        stop_event: Optional[asyncio.Event] = None,
+        confirm: Optional[ConfirmFn] = None,
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
         XML-basiertes Tool-Calling: Tool-Beschreibungen in System-Prompt injiziert.
@@ -335,8 +388,12 @@ class ToolCaller:
             )
 
             full_response = ""
+            stopped = False
             try:
                 async for token in provider.chat(messages, model=model, system_prompt=full_system):
+                    if stop_event is not None and stop_event.is_set():
+                        stopped = True
+                        break
                     full_response += token
                     fl = full_response.lower()
                     in_tool = fl.count("<tool_call>") > fl.count("</tool_call>")
@@ -346,6 +403,10 @@ class ToolCaller:
             except Exception as e:
                 logger.error(f"Provider-Fehler (XML): {e}")
                 yield {"type": "error", "message": f"Modell-Fehler: {str(e)}"}
+                return
+
+            if stopped:
+                yield {"type": "done", "tool_calls": all_tool_calls}
                 return
 
             detected_calls = self._extract_tool_calls(full_response)
@@ -363,21 +424,12 @@ class ToolCaller:
             for call in detected_calls:
                 tool_name = call["name"]
                 tool_args = _sanitize_tool_args(call["arguments"])
-
-                yield {"type": "tool_start", "name": tool_name, "arguments": tool_args}
-
-                tool = self.tools.get(tool_name)
-                if tool is None:
-                    result = f"Unbekanntes Tool: {tool_name}"
-                    logger.warning(result)
-                else:
-                    try:
-                        result = await tool.execute(tool_args)
-                    except Exception as e:
-                        result = f"Fehler bei Tool {tool_name}: {str(e)}"
-                        logger.error(result)
-
-                yield {"type": "tool_end", "name": tool_name, "result": result}
+                result = ""
+                async for ev in self._execute_call(tool_name, tool_args, confirm):
+                    if isinstance(ev, tuple) and ev[0] == "__result__":
+                        result = ev[1]
+                    else:
+                        yield ev
                 all_tool_calls.append({**call, "result": result})
 
                 tool_results_text += (
@@ -422,17 +474,23 @@ async def load_active_tools(
 
         server_type = server.get("type", "")
 
+        requires_confirmation = bool(server.get("requires_confirmation", False))
+
         if server_type == "mcp":
             client = MCPClient(
                 server_url=server.get("url", ""),
                 api_key=server.get("api_key"),
             )
             mcp_tools = await client.list_tools()
+            for t in mcp_tools:
+                t.requires_confirmation = requires_confirmation
             active_tools.extend(mcp_tools)
             logger.info(f"MCP-Server '{server['name']}': {len(mcp_tools)} Tools geladen")
 
         elif server_type == "rest":
             rest_tools = create_rest_tools(server)
+            for t in rest_tools:
+                t.requires_confirmation = requires_confirmation
             active_tools.extend(rest_tools)
             logger.info(f"REST-Server '{server['name']}': {len(rest_tools)} Tools geladen")
 

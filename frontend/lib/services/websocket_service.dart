@@ -97,6 +97,28 @@ class WebSocketService {
     _channel!.sink.add(jsonEncode({'content': content}));
   }
 
+  void _sendJson(Map<String, dynamic> data) {
+    if (_channel == null || _state != WsConnectionState.connected) return;
+    _channel!.sink.add(jsonEncode(data));
+  }
+
+  /// Bricht die laufende Generierung ab.
+  void sendStop() => _sendJson({'type': 'stop'});
+
+  /// Fordert eine neue Antwort an (ohne neue Nutzernachricht).
+  void sendRegenerate() {
+    if (_channel == null || _state != WsConnectionState.connected) {
+      _eventController.addError('WebSocket nicht verbunden');
+      return;
+    }
+    _streaming = true;
+    _sendJson({'type': 'regenerate'});
+  }
+
+  /// Antwortet auf eine Tool-Bestätigungsanfrage.
+  void sendDecision(bool approved) =>
+      _sendJson({'type': 'tool_decision', 'approved': approved});
+
   /// Trennt die WebSocket-Verbindung.
   void disconnect() {
     _channel?.sink.close();

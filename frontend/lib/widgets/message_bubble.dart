@@ -5,8 +5,14 @@
 /// - Tool-Calls: aufklappbare Sub-Widgets
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_markdown/flutter_markdown.dart';
+import 'package:flutter_highlight/flutter_highlight.dart';
+import 'package:flutter_highlight/themes/atom-one-dark.dart';
+import 'package:flutter_highlight/themes/atom-one-light.dart';
+import 'package:markdown/markdown.dart' as md;
 import '../models/models.dart';
+import '../theme.dart';
 import 'tool_call_widget.dart';
 
 // ── Think-Block Parsing ────────────────────────────────────────────────────
@@ -52,8 +58,15 @@ bool _hasOpenThinkBlock(String content) {
 
 class MessageBubble extends StatelessWidget {
   final ChatMessage message;
+  final VoidCallback? onEdit;        // nur Nutzernachrichten
+  final VoidCallback? onRegenerate;  // nur letzte Assistentennachricht
 
-  const MessageBubble({super.key, required this.message});
+  const MessageBubble({
+    super.key,
+    required this.message,
+    this.onEdit,
+    this.onRegenerate,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -79,6 +92,12 @@ class MessageBubble extends StatelessWidget {
                   const SizedBox(height: 6),
                   ...buildToolCallWidgets(message.toolCalls, message.toolResults),
                 ],
+                _MessageActions(
+                  isUser: isUser,
+                  content: message.content,
+                  onEdit: onEdit,
+                  onRegenerate: onRegenerate,
+                ),
               ],
             ),
           ),
@@ -86,6 +105,55 @@ class MessageBubble extends StatelessWidget {
             const SizedBox(width: 8),
             _Avatar(isUser: true),
           ],
+        ],
+      ),
+    );
+  }
+}
+
+
+/// Aktionsleiste unter einer Nachricht: Kopieren, Bearbeiten, Neu generieren.
+class _MessageActions extends StatelessWidget {
+  final bool isUser;
+  final String content;
+  final VoidCallback? onEdit;
+  final VoidCallback? onRegenerate;
+
+  const _MessageActions({
+    required this.isUser,
+    required this.content,
+    this.onEdit,
+    this.onRegenerate,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    Widget btn(IconData icon, String tip, VoidCallback onTap) => IconButton(
+          icon: Icon(icon, size: 15),
+          tooltip: tip,
+          visualDensity: VisualDensity.compact,
+          padding: const EdgeInsets.all(4),
+          constraints: const BoxConstraints(),
+          color: cs.onSurfaceVariant,
+          onPressed: onTap,
+        );
+
+    return Padding(
+      padding: const EdgeInsets.only(top: 2),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        children: [
+          btn(Icons.copy_outlined, 'Kopieren', () {
+            Clipboard.setData(ClipboardData(text: content));
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('Kopiert'), duration: Duration(seconds: 1)),
+            );
+          }),
+          if (isUser && onEdit != null) btn(Icons.edit_outlined, 'Bearbeiten', onEdit!),
+          if (!isUser && onRegenerate != null)
+            btn(Icons.refresh, 'Neu generieren', onRegenerate!),
         ],
       ),
     );
@@ -106,31 +174,33 @@ class _BubbleContent extends StatelessWidget {
     final theme = Theme.of(context);
     final colorScheme = theme.colorScheme;
 
-    final bgColor = isUser
-        ? colorScheme.primary
-        : colorScheme.surfaceContainerHigh;
-    final textColor = isUser
-        ? colorScheme.onPrimary
-        : colorScheme.onSurface;
+    final textColor = isUser ? Colors.white : colorScheme.onSurface;
 
     if (isUser) {
       return Container(
         constraints: BoxConstraints(
           maxWidth: MediaQuery.of(context).size.width * 0.75,
         ),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+        padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
         decoration: BoxDecoration(
-          color: bgColor,
+          gradient: NexusColors.accentGradient,
           borderRadius: const BorderRadius.only(
-            topLeft: Radius.circular(16),
-            topRight: Radius.circular(16),
-            bottomLeft: Radius.circular(16),
-            bottomRight: Radius.circular(4),
+            topLeft: Radius.circular(18),
+            topRight: Radius.circular(18),
+            bottomLeft: Radius.circular(18),
+            bottomRight: Radius.circular(6),
           ),
+          boxShadow: [
+            BoxShadow(
+              color: NexusColors.seed.withValues(alpha: 0.28),
+              blurRadius: 16,
+              offset: const Offset(0, 4),
+            ),
+          ],
         ),
         child: SelectableText(
           message.content,
-          style: theme.textTheme.bodyMedium?.copyWith(color: textColor),
+          style: theme.textTheme.bodyMedium?.copyWith(color: textColor, height: 1.4),
         ),
       );
     }
@@ -142,15 +212,16 @@ class _BubbleContent extends StatelessWidget {
       constraints: BoxConstraints(
         maxWidth: MediaQuery.of(context).size.width * 0.75,
       ),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      padding: const EdgeInsets.symmetric(horizontal: 15, vertical: 11),
       decoration: BoxDecoration(
-        color: bgColor,
+        color: colorScheme.surfaceContainer,
         borderRadius: const BorderRadius.only(
-          topLeft: Radius.circular(16),
-          topRight: Radius.circular(16),
-          bottomLeft: Radius.circular(4),
-          bottomRight: Radius.circular(16),
+          topLeft: Radius.circular(18),
+          topRight: Radius.circular(18),
+          bottomLeft: Radius.circular(6),
+          bottomRight: Radius.circular(18),
         ),
+        border: Border.all(color: colorScheme.outlineVariant),
       ),
       child: segments.isEmpty
           ? Text('...', style: theme.textTheme.bodyMedium?.copyWith(color: colorScheme.onSurfaceVariant))
@@ -280,19 +351,17 @@ class _MarkdownSegment extends StatelessWidget {
   Widget build(BuildContext context) {
     return MarkdownBody(
       data: content,
+      builders: {'code': _CodeElementBuilder(theme)},
       styleSheet: MarkdownStyleSheet(
         p: theme.textTheme.bodyMedium?.copyWith(color: textColor),
         code: TextStyle(
           fontFamily: 'monospace',
           fontSize: 13,
-          backgroundColor: colorScheme.surface.withOpacity(0.5),
+          backgroundColor: colorScheme.surfaceContainerHighest,
           color: colorScheme.onSurface,
         ),
-        codeblockDecoration: BoxDecoration(
-          color: colorScheme.surface,
-          borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: colorScheme.outlineVariant),
-        ),
+        codeblockPadding: EdgeInsets.zero,
+        codeblockDecoration: const BoxDecoration(),
         h1: theme.textTheme.titleLarge?.copyWith(color: textColor),
         h2: theme.textTheme.titleMedium?.copyWith(color: textColor),
         h3: theme.textTheme.titleSmall?.copyWith(color: textColor),
@@ -309,6 +378,93 @@ class _MarkdownSegment extends StatelessWidget {
 }
 
 
+// ── Code-Block mit Syntax-Highlighting + Copy ───────────────────────────────
+
+class _CodeElementBuilder extends MarkdownElementBuilder {
+  final ThemeData theme;
+  _CodeElementBuilder(this.theme);
+
+  @override
+  Widget? visitElementAfter(md.Element element, TextStyle? preferredStyle) {
+    var language = '';
+    final cls = element.attributes['class'];
+    if (cls != null && cls.startsWith('language-')) {
+      language = cls.substring('language-'.length);
+    }
+    final text = element.textContent;
+    // Inline-Code (kein Block) → Standard-Rendering verwenden
+    if (language.isEmpty && !text.contains('\n')) return null;
+    return _CodeBlock(code: text.replaceAll(RegExp(r'\n$'), ''), language: language, theme: theme);
+  }
+}
+
+class _CodeBlock extends StatelessWidget {
+  final String code;
+  final String language;
+  final ThemeData theme;
+  const _CodeBlock({required this.code, required this.language, required this.theme});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = theme.colorScheme;
+    final isDark = theme.brightness == Brightness.dark;
+    return Container(
+      margin: const EdgeInsets.symmetric(vertical: 6),
+      decoration: BoxDecoration(
+        color: isDark ? const Color(0xFF15151C) : const Color(0xFFF4F2FB),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.outlineVariant),
+      ),
+      clipBehavior: Clip.antiAlias,
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // Kopfzeile mit Sprache + Copy
+          Container(
+            padding: const EdgeInsets.fromLTRB(12, 4, 4, 4),
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.5),
+            child: Row(
+              children: [
+                Text(
+                  language.isEmpty ? 'Code' : language,
+                  style: theme.textTheme.labelSmall?.copyWith(color: cs.onSurfaceVariant),
+                ),
+                const Spacer(),
+                IconButton(
+                  icon: const Icon(Icons.copy_outlined, size: 15),
+                  tooltip: 'Code kopieren',
+                  visualDensity: VisualDensity.compact,
+                  padding: const EdgeInsets.all(4),
+                  constraints: const BoxConstraints(),
+                  color: cs.onSurfaceVariant,
+                  onPressed: () {
+                    Clipboard.setData(ClipboardData(text: code));
+                    ScaffoldMessenger.of(context).showSnackBar(
+                      const SnackBar(content: Text('Code kopiert'), duration: Duration(seconds: 1)),
+                    );
+                  },
+                ),
+              ],
+            ),
+          ),
+          // Code mit Highlighting (horizontal scrollbar)
+          SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: HighlightView(
+              code,
+              language: language.isEmpty ? 'plaintext' : language,
+              theme: isDark ? atomOneDarkTheme : atomOneLightTheme,
+              padding: const EdgeInsets.all(12),
+              textStyle: const TextStyle(fontFamily: 'monospace', fontSize: 12.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
 // ── Avatar ─────────────────────────────────────────────────────────────────
 
 class _Avatar extends StatelessWidget {
@@ -318,14 +474,29 @@ class _Avatar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    return CircleAvatar(
-      radius: 14,
-      backgroundColor: isUser ? colorScheme.primaryContainer : colorScheme.secondaryContainer,
-      child: Icon(
-        isUser ? Icons.person : Icons.smart_toy_outlined,
-        size: 16,
-        color: isUser ? colorScheme.onPrimaryContainer : colorScheme.onSecondaryContainer,
+    if (isUser) {
+      return CircleAvatar(
+        radius: 15,
+        backgroundColor: colorScheme.surfaceContainerHighest,
+        child: Icon(Icons.person, size: 17, color: colorScheme.onSurfaceVariant),
+      );
+    }
+    // KI-Avatar mit Marken-Verlauf
+    return Container(
+      width: 30,
+      height: 30,
+      decoration: BoxDecoration(
+        gradient: NexusColors.accentGradient,
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(
+            color: NexusColors.seed.withValues(alpha: 0.35),
+            blurRadius: 10,
+            offset: const Offset(0, 2),
+          ),
+        ],
       ),
+      child: const Icon(Icons.auto_awesome, size: 16, color: Colors.white),
     );
   }
 }

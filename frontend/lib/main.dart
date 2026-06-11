@@ -8,16 +8,21 @@
 /// - Web/Docker: relativ (leer), nginx proxied /api und /ws
 /// - Desktop: konfigurierbar in Einstellungen (Standard: http://localhost:8099)
 
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'theme.dart';
 import 'models/models.dart';
 import 'services/api_service.dart';
 import 'screens/auth_screen.dart';
+import 'screens/change_password_screen.dart';
 import 'screens/chat_list_screen.dart';
 import 'screens/chat_screen.dart';
 import 'screens/provider_screen.dart';
 import 'screens/tool_screen.dart';
 import 'screens/user_management_screen.dart';
+import 'screens/health_screen.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -34,21 +39,38 @@ class NexusChatApp extends StatefulWidget {
 }
 
 class _NexusChatAppState extends State<NexusChatApp> {
-  ThemeMode _themeMode = ThemeMode.dark;
+  ThemeMode _themeMode = ThemeMode.system;
 
   @override
   void initState() {
     super.initState();
-    final saved = widget.prefs.getString('theme') ?? 'dark';
-    _themeMode = saved == 'light' ? ThemeMode.light : ThemeMode.dark;
+    _themeMode = _parseMode(widget.prefs.getString('theme_mode'));
+  }
+
+  ThemeMode _parseMode(String? s) => switch (s) {
+        'light' => ThemeMode.light,
+        'dark' => ThemeMode.dark,
+        _ => ThemeMode.system,
+      };
+
+  String _modeName(ThemeMode m) => switch (m) {
+        ThemeMode.light => 'light',
+        ThemeMode.dark => 'dark',
+        ThemeMode.system => 'system',
+      };
+
+  void _setThemeMode(ThemeMode mode) {
+    setState(() => _themeMode = mode);
+    widget.prefs.setString('theme_mode', _modeName(mode));
   }
 
   void _toggleTheme() {
-    setState(() {
-      _themeMode = _themeMode == ThemeMode.dark ? ThemeMode.light : ThemeMode.dark;
-      widget.prefs.setString(
-          'theme', _themeMode == ThemeMode.dark ? 'dark' : 'light');
-    });
+    // Schnell-Umschalter zwischen Hell und Dunkel
+    final isDark = _themeMode == ThemeMode.dark ||
+        (_themeMode == ThemeMode.system &&
+            WidgetsBinding.instance.platformDispatcher.platformBrightness ==
+                Brightness.dark);
+    _setThemeMode(isDark ? ThemeMode.light : ThemeMode.dark);
   }
 
   @override
@@ -57,21 +79,14 @@ class _NexusChatAppState extends State<NexusChatApp> {
       title: 'NexusChat',
       debugShowCheckedModeBanner: false,
       themeMode: _themeMode,
-      theme: _buildTheme(Brightness.light),
-      darkTheme: _buildTheme(Brightness.dark),
-      home: AppShell(prefs: widget.prefs, onToggleTheme: _toggleTheme),
-    );
-  }
-
-  ThemeData _buildTheme(Brightness brightness) {
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: const Color(0xFF6750A4),
-      brightness: brightness,
-    );
-    return ThemeData(
-      colorScheme: colorScheme,
-      useMaterial3: true,
-      fontFamily: 'Inter',
+      theme: buildNexusTheme(Brightness.light),
+      darkTheme: buildNexusTheme(Brightness.dark),
+      home: AppShell(
+        prefs: widget.prefs,
+        onToggleTheme: _toggleTheme,
+        themeMode: _themeMode,
+        onThemeModeChanged: _setThemeMode,
+      ),
     );
   }
 }
@@ -82,8 +97,16 @@ class _NexusChatAppState extends State<NexusChatApp> {
 class AppShell extends StatefulWidget {
   final SharedPreferences prefs;
   final VoidCallback onToggleTheme;
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
 
-  const AppShell({super.key, required this.prefs, required this.onToggleTheme});
+  const AppShell({
+    super.key,
+    required this.prefs,
+    required this.onToggleTheme,
+    required this.themeMode,
+    required this.onThemeModeChanged,
+  });
 
   @override
   State<AppShell> createState() => _AppShellState();
@@ -158,6 +181,16 @@ class _AppShellState extends State<AppShell> {
     });
   }
 
+  /// Nach Passwortänderung: neues Token + User übernehmen (Navigation behalten).
+  void _onPasswordChanged(String token, AppUser user) {
+    widget.prefs.setString('auth_token', token);
+    setState(() {
+      _token = token;
+      _user = user;
+      _api = _api.withToken(token);
+    });
+  }
+
   void _onBackendUrlChanged(String url) {
     setState(() {
       _backendUrl = url;
@@ -194,6 +227,15 @@ class _AppShellState extends State<AppShell> {
       return AuthScreen(api: _api, onAuthenticated: _onAuthenticated);
     }
 
+    // Erzwungener Passwortwechsel (vom Admin erstellt/zurückgesetzt)
+    if (_user!.mustChangePassword) {
+      return ChangePasswordScreen(
+        api: _api,
+        onChanged: _onPasswordChanged,
+        onLogout: _logout,
+      );
+    }
+
     final width = MediaQuery.of(context).size.width;
     final isWide = width >= 800;
 
@@ -212,8 +254,11 @@ class _AppShellState extends State<AppShell> {
       }),
       onNewChat: _createNewChat,
       onToggleTheme: widget.onToggleTheme,
+      themeMode: widget.themeMode,
+      onThemeModeChanged: widget.onThemeModeChanged,
       onBackendUrlChanged: _onBackendUrlChanged,
       onLogout: _logout,
+      onPasswordChanged: _onPasswordChanged,
     ) : _NarrowLayout(
       navIndex: _navIndex,
       currentChatId: _currentChatId,
@@ -229,8 +274,11 @@ class _AppShellState extends State<AppShell> {
       }),
       onNewChat: _createNewChat,
       onToggleTheme: widget.onToggleTheme,
+      themeMode: widget.themeMode,
+      onThemeModeChanged: widget.onThemeModeChanged,
       onBackendUrlChanged: _onBackendUrlChanged,
       onLogout: _logout,
+      onPasswordChanged: _onPasswordChanged,
     );
   }
 }
@@ -252,6 +300,7 @@ List<_NavSpec> _navSpecsFor(AppUser user) => [
         const _NavSpec(Icons.cloud_outlined, Icons.cloud, 'Provider'),
         const _NavSpec(Icons.build_outlined, Icons.build, 'Tools'),
         const _NavSpec(Icons.people_outline, Icons.people, 'Benutzer'),
+        const _NavSpec(Icons.monitor_heart_outlined, Icons.monitor_heart, 'Status'),
       ],
       const _NavSpec(Icons.settings_outlined, Icons.settings, 'Einstellungen'),
     ];
@@ -271,8 +320,11 @@ class _WideLayout extends StatelessWidget {
   final ValueChanged<String> onChatSelected;
   final VoidCallback onNewChat;
   final VoidCallback onToggleTheme;
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
   final ValueChanged<String> onBackendUrlChanged;
   final VoidCallback onLogout;
+  final void Function(String, AppUser) onPasswordChanged;
 
   const _WideLayout({
     required this.navIndex,
@@ -286,8 +338,11 @@ class _WideLayout extends StatelessWidget {
     required this.onChatSelected,
     required this.onNewChat,
     required this.onToggleTheme,
+    required this.themeMode,
+    required this.onThemeModeChanged,
     required this.onBackendUrlChanged,
     required this.onLogout,
+    required this.onPasswordChanged,
   });
 
   @override
@@ -364,8 +419,11 @@ class _WideLayout extends StatelessWidget {
               chatListRefreshKey: chatListRefreshKey,
               onChatSelected: onChatSelected,
               onNewChat: onNewChat,
+              themeMode: themeMode,
+              onThemeModeChanged: onThemeModeChanged,
               onBackendUrlChanged: onBackendUrlChanged,
               onLogout: onLogout,
+              onPasswordChanged: onPasswordChanged,
               chatEmptyPlaceholder: const _NoChatSelected(),
             ),
           ),
@@ -390,8 +448,11 @@ class _NarrowLayout extends StatelessWidget {
   final ValueChanged<String> onChatSelected;
   final VoidCallback onNewChat;
   final VoidCallback onToggleTheme;
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
   final ValueChanged<String> onBackendUrlChanged;
   final VoidCallback onLogout;
+  final void Function(String, AppUser) onPasswordChanged;
 
   const _NarrowLayout({
     required this.navIndex,
@@ -405,8 +466,11 @@ class _NarrowLayout extends StatelessWidget {
     required this.onChatSelected,
     required this.onNewChat,
     required this.onToggleTheme,
+    required this.themeMode,
+    required this.onThemeModeChanged,
     required this.onBackendUrlChanged,
     required this.onLogout,
+    required this.onPasswordChanged,
   });
 
   @override
@@ -426,8 +490,11 @@ class _NarrowLayout extends StatelessWidget {
         chatListRefreshKey: chatListRefreshKey,
         onChatSelected: onChatSelected,
         onNewChat: onNewChat,
+        themeMode: themeMode,
+        onThemeModeChanged: onThemeModeChanged,
         onBackendUrlChanged: onBackendUrlChanged,
         onLogout: onLogout,
+        onPasswordChanged: onPasswordChanged,
         // Im schmalen Layout zeigt der Chat-Tab ohne Auswahl die Liste
         chatEmptyPlaceholder: ChatListScreen(
           key: ValueKey(chatListRefreshKey),
@@ -461,8 +528,11 @@ Widget _bodyFor({
   required int chatListRefreshKey,
   required ValueChanged<String> onChatSelected,
   required VoidCallback onNewChat,
+  required ThemeMode themeMode,
+  required ValueChanged<ThemeMode> onThemeModeChanged,
   required ValueChanged<String> onBackendUrlChanged,
   required VoidCallback onLogout,
+  required void Function(String, AppUser) onPasswordChanged,
   required Widget chatEmptyPlaceholder,
 }) {
   switch (label) {
@@ -482,12 +552,18 @@ Widget _bodyFor({
       return ToolScreen(api: api);
     case 'Benutzer':
       return UserManagementScreen(api: api);
+    case 'Status':
+      return HealthScreen(api: api);
     case 'Einstellungen':
       return _SettingsScreen(
+        api: api,
         backendUrl: backendUrl,
         user: user,
+        themeMode: themeMode,
+        onThemeModeChanged: onThemeModeChanged,
         onBackendUrlChanged: onBackendUrlChanged,
         onLogout: onLogout,
+        onPasswordChanged: onPasswordChanged,
       );
     default:
       return const SizedBox.shrink();
@@ -498,16 +574,24 @@ Widget _bodyFor({
 // ── Einstellungen-Screen ───────────────────────────────────────────────────
 
 class _SettingsScreen extends StatefulWidget {
+  final ApiService api;
   final String backendUrl;
   final AppUser user;
+  final ThemeMode themeMode;
+  final ValueChanged<ThemeMode> onThemeModeChanged;
   final ValueChanged<String> onBackendUrlChanged;
   final VoidCallback onLogout;
+  final void Function(String, AppUser) onPasswordChanged;
 
   const _SettingsScreen({
+    required this.api,
     required this.backendUrl,
     required this.user,
+    required this.themeMode,
+    required this.onThemeModeChanged,
     required this.onBackendUrlChanged,
     required this.onLogout,
+    required this.onPasswordChanged,
   });
 
   @override
@@ -521,6 +605,38 @@ class _SettingsScreenState extends State<_SettingsScreen> {
   void initState() {
     super.initState();
     _urlCtrl = TextEditingController(text: widget.backendUrl);
+  }
+
+  Future<void> _changePassword() async {
+    final result = await showChangePasswordDialog(context, widget.api);
+    if (result == null) return;
+    widget.onPasswordChanged(result.$1, result.$2);
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Passwort geändert')),
+      );
+    }
+  }
+
+  Future<void> _downloadBackup() async {
+    try {
+      final bytes = await widget.api.downloadBackup();
+      final dir = Directory.systemTemp.path;
+      final stamp = DateTime.now().toIso8601String().replaceAll(RegExp(r'[:.]'), '-');
+      final path = '$dir${Platform.pathSeparator}nexuschat-backup-$stamp.db';
+      await File(path).writeAsBytes(bytes);
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Backup gespeichert: $path'), duration: const Duration(seconds: 6)),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('Backup fehlgeschlagen: $e'), backgroundColor: Colors.red),
+        );
+      }
+    }
   }
 
   @override
@@ -540,16 +656,49 @@ class _SettingsScreenState extends State<_SettingsScreen> {
           Text('Konto', style: Theme.of(context).textTheme.titleMedium),
           const SizedBox(height: 12),
           Card(
-            child: ListTile(
-              leading: Icon(widget.user.isAdmin ? Icons.shield : Icons.person),
-              title: Text(widget.user.username),
-              subtitle: Text(widget.user.isAdmin ? 'Administrator' : 'Benutzer'),
-              trailing: OutlinedButton.icon(
-                icon: const Icon(Icons.logout, size: 18),
-                label: const Text('Abmelden'),
-                onPressed: widget.onLogout,
-              ),
+            child: Column(
+              children: [
+                ListTile(
+                  leading: Icon(widget.user.isAdmin ? Icons.shield : Icons.person),
+                  title: Text(widget.user.username),
+                  subtitle: Text(widget.user.isAdmin ? 'Administrator' : 'Benutzer'),
+                  trailing: OutlinedButton.icon(
+                    icon: const Icon(Icons.logout, size: 18),
+                    label: const Text('Abmelden'),
+                    onPressed: widget.onLogout,
+                  ),
+                ),
+                const Divider(height: 1),
+                ListTile(
+                  leading: const Icon(Icons.password),
+                  title: const Text('Passwort ändern'),
+                  trailing: const Icon(Icons.chevron_right),
+                  onTap: _changePassword,
+                ),
+                if (widget.user.isAdmin) ...[
+                  const Divider(height: 1),
+                  ListTile(
+                    leading: const Icon(Icons.backup_outlined),
+                    title: const Text('Datenbank-Backup herunterladen'),
+                    trailing: const Icon(Icons.download),
+                    onTap: _downloadBackup,
+                  ),
+                ],
+              ],
             ),
+          ),
+          const SizedBox(height: 32),
+          Text('Erscheinungsbild', style: Theme.of(context).textTheme.titleMedium),
+          const SizedBox(height: 12),
+          SegmentedButton<ThemeMode>(
+            segments: const [
+              ButtonSegment(value: ThemeMode.system, icon: Icon(Icons.brightness_auto), label: Text('System')),
+              ButtonSegment(value: ThemeMode.light, icon: Icon(Icons.light_mode_outlined), label: Text('Hell')),
+              ButtonSegment(value: ThemeMode.dark, icon: Icon(Icons.dark_mode_outlined), label: Text('Dunkel')),
+            ],
+            selected: {widget.themeMode},
+            onSelectionChanged: (s) => widget.onThemeModeChanged(s.first),
+            showSelectedIcon: false,
           ),
           const SizedBox(height: 32),
           Text('Backend', style: Theme.of(context).textTheme.titleMedium),

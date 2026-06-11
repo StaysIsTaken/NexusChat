@@ -23,6 +23,10 @@ dependencies:
   # Markdown Rendering
   flutter_markdown: ^0.7.3
 
+  # Code-Syntax-Highlighting in Markdown-Codeblöcken
+  flutter_highlight: ^0.7.0
+  markdown: ^7.2.0
+
   # Lokale Einstellungen (Backend-URL, Theme)
   shared_preferences: ^2.2.3
 

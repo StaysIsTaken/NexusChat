@@ -23,6 +23,7 @@ from core.mcp_client import MCPClient
 from core.auth import (
     can_use_tool, get_current_user, require_admin, user_tool_ids,
 )
+from core.crypto import decrypt_secret, encrypt_secret
 from tools.rest_tool import create_rest_tools
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -35,6 +36,7 @@ class ToolServerCreate(BaseModel):
     api_key: Optional[str] = None
     config: Optional[Dict[str, Any]] = None
     is_enabled: bool = True
+    requires_confirmation: bool = False
 
 
 class ToolServerUpdate(BaseModel):
@@ -44,6 +46,7 @@ class ToolServerUpdate(BaseModel):
     api_key: Optional[str] = None
     config: Optional[Dict[str, Any]] = None
     is_enabled: Optional[bool] = None
+    requires_confirmation: Optional[bool] = None
 
 
 @router.get("")
@@ -70,9 +73,10 @@ async def create_tool_server(
         name=data.name,
         type=data.type,
         url=data.url,
-        api_key=data.api_key,
+        api_key=await encrypt_secret(db, data.api_key),
         config=data.config or {},
         is_enabled=data.is_enabled,
+        requires_confirmation=data.requires_confirmation,
     )
     db.add(server)
     await db.commit()
@@ -105,7 +109,10 @@ async def update_tool_server(
     if not server:
         raise HTTPException(404, "Tool-Server nicht gefunden")
 
-    for field, value in data.model_dump(exclude_none=True).items():
+    fields = data.model_dump(exclude_none=True)
+    if "api_key" in fields:
+        fields["api_key"] = await encrypt_secret(db, fields["api_key"])
+    for field, value in fields.items():
         setattr(server, field, value)
 
     await db.commit()
@@ -139,13 +146,15 @@ async def list_server_tools(
     if not await can_use_tool(db, user, server_id):
         raise HTTPException(403, "Kein Zugriff auf diesen Tool-Server.")
 
+    api_key = await decrypt_secret(db, server.api_key)
     server_dict = server.to_dict()
+    server_dict["api_key"] = api_key
     tools_info = []
 
     if server.type == "mcp":
         client = MCPClient(
             server_url=server.url or "",
-            api_key=server.api_key,
+            api_key=api_key,
         )
         tools = await client.list_tools()
         tools_info = [
@@ -193,7 +202,7 @@ async def test_tool_server(
     if server.type == "mcp":
         client = MCPClient(
             server_url=server.url or "",
-            api_key=server.api_key,
+            api_key=await decrypt_secret(db, server.api_key),
         )
         ok = await client.test_connection()
         message = "MCP-Server verbunden" if ok else "Verbindung zum MCP-Server fehlgeschlagen"

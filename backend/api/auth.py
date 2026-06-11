@@ -9,6 +9,8 @@ Endpoints:
 """
 
 import logging
+import time
+from collections import defaultdict
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
@@ -28,10 +30,38 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api/auth", tags=["auth"])
 
+# ── Brute-Force-Schutz für Login (in-memory) ─────────────────────────────────
+_MAX_ATTEMPTS = 8
+_WINDOW_SECONDS = 300  # 5 Minuten
+_login_attempts: dict[str, list[float]] = defaultdict(list)
+
+
+def _check_rate_limit(key: str) -> None:
+    now = time.monotonic()
+    attempts = [t for t in _login_attempts[key] if now - t < _WINDOW_SECONDS]
+    _login_attempts[key] = attempts
+    if len(attempts) >= _MAX_ATTEMPTS:
+        raise HTTPException(
+            429, "Zu viele Login-Versuche. Bitte warte ein paar Minuten."
+        )
+
+
+def _record_attempt(key: str) -> None:
+    _login_attempts[key].append(time.monotonic())
+
+
+def _reset_attempts(key: str) -> None:
+    _login_attempts.pop(key, None)
+
 
 class Credentials(BaseModel):
     username: str
     password: str
+
+
+class PasswordChange(BaseModel):
+    current_password: str
+    new_password: str
 
 
 async def _admin_exists(db: AsyncSession) -> bool:
@@ -78,11 +108,16 @@ async def setup_admin(data: Credentials, db: AsyncSession = Depends(get_session)
 
 @router.post("/login")
 async def login(data: Credentials, db: AsyncSession = Depends(get_session)):
-    result = await db.execute(select(User).where(User.username == data.username.strip()))
+    username = data.username.strip()
+    _check_rate_limit(username)
+
+    result = await db.execute(select(User).where(User.username == username))
     user = result.scalar_one_or_none()
     if user is None or not verify_password(data.password, user.password_hash):
+        _record_attempt(username)
         raise HTTPException(401, "Benutzername oder Passwort falsch.")
 
+    _reset_attempts(username)
     secret = await get_jwt_secret(db)
     token = create_token(secret, user)
     return {"token": token, "user": user.to_dict()}
@@ -91,3 +126,26 @@ async def login(data: Credentials, db: AsyncSession = Depends(get_session)):
 @router.get("/me")
 async def me(user: User = Depends(get_current_user)):
     return user.to_dict()
+
+
+@router.put("/password")
+async def change_own_password(
+    data: PasswordChange,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Eigenes Passwort ändern (auch zum Erfüllen eines erzwungenen Wechsels)."""
+    if not verify_password(data.current_password, user.password_hash):
+        raise HTTPException(403, "Aktuelles Passwort ist falsch.")
+    if len(data.new_password) < 4:
+        raise HTTPException(400, "Neues Passwort ist zu kurz.")
+
+    user.password_hash = hash_password(data.new_password)
+    user.must_change_password = False
+    await db.commit()
+    await db.refresh(user)
+
+    # Frisches Token ausstellen (Rolle/Flag könnten sich geändert haben)
+    secret = await get_jwt_secret(db)
+    token = create_token(secret, user)
+    return {"token": token, "user": user.to_dict()}

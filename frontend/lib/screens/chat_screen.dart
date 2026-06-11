@@ -8,8 +8,11 @@
 /// - System-Prompt editierbar
 
 import 'dart:async';
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import '../models/models.dart';
+import '../theme.dart';
 import '../services/api_service.dart';
 import '../services/websocket_service.dart';
 import '../widgets/message_bubble.dart';
@@ -41,6 +44,9 @@ class _ChatScreenState extends State<ChatScreen> {
   String _streamingContent = '';
   List<ActiveToolCall> _activeToolCalls = [];
   bool _isStreaming = false;
+
+  // Ausstehende Tool-Bestätigung (name + arguments) – null wenn keine
+  Map<String, dynamic>? _pendingConfirm;
 
   final TextEditingController _inputCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
@@ -135,11 +141,26 @@ class _ChatScreenState extends State<ChatScreen> {
           final idx = _activeToolCalls.indexWhere((t) => t.name == event.name);
           if (idx >= 0) _activeToolCalls[idx].result = event.result;
 
+        case WsEventType.toolConfirm:
+          // Backend fragt ob das Tool ausgeführt werden darf
+          _pendingConfirm = {
+            'name': event.name ?? '',
+            'arguments': event.arguments ?? {},
+          };
+          _scrollToBottom();
+
+        case WsEventType.title:
+          // Auto-Titel vom Backend → AppBar-Titel aktualisieren
+          if (event.title != null && _chat != null) {
+            _chat = _chat!.copyWith(title: event.title);
+          }
+
         case WsEventType.done:
           // Streaming beendet → Chat neu laden für finale Nachricht
           _isStreaming = false;
           _streamingContent = '';
           _activeToolCalls = [];
+          _pendingConfirm = null;
           _sending = false;
           _loadChat();
           _scrollToBottom();
@@ -148,10 +169,78 @@ class _ChatScreenState extends State<ChatScreen> {
           _isStreaming = false;
           _streamingContent = '';
           _activeToolCalls = [];
+          _pendingConfirm = null;
           _sending = false;
           _showError(event.message ?? 'Unbekannter Fehler');
       }
     });
+  }
+
+  void _respondConfirm(bool approved) {
+    _ws.sendDecision(approved);
+    setState(() => _pendingConfirm = null);
+  }
+
+  void _stopGeneration() {
+    _ws.sendStop();
+  }
+
+  Future<void> _regenerate() async {
+    if (_sending) return;
+    setState(() {
+      _sending = true;
+      _streamingContent = '';
+      _activeToolCalls = [];
+      _isStreaming = true;
+    });
+    _ensureConnected();
+    _ws.sendRegenerate();
+    _scrollToBottom();
+  }
+
+  Future<void> _editMessage(ChatMessage msg) async {
+    final ctrl = TextEditingController(text: msg.content);
+    final newContent = await showDialog<String>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('Nachricht bearbeiten'),
+        content: TextField(
+          controller: ctrl,
+          autofocus: true,
+          maxLines: null,
+          decoration: const InputDecoration(border: OutlineInputBorder()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(context), child: const Text('Abbrechen')),
+          FilledButton(
+            onPressed: () => Navigator.pop(context, ctrl.text.trim()),
+            child: const Text('Speichern & neu generieren'),
+          ),
+        ],
+      ),
+    );
+    if (newContent == null || newContent.isEmpty || newContent == msg.content) return;
+    try {
+      await widget.api.editMessage(widget.chatId, msg.id, newContent);
+      await _loadChat();          // gekürzten Verlauf laden
+      await _regenerate();        // neue Antwort anfordern
+    } catch (e) {
+      _showError('$e');
+    }
+  }
+
+  void _exportMarkdown() {
+    final messages = _chat?.messages ?? [];
+    final buf = StringBuffer('# ${_chat?.title ?? "Chat"}\n\n');
+    for (final m in messages) {
+      final who = m.role == 'user' ? '**Du**' : '**Assistent**';
+      buf.writeln('$who:\n\n${m.content}\n');
+      buf.writeln('---\n');
+    }
+    Clipboard.setData(ClipboardData(text: buf.toString()));
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('Chat als Markdown in die Zwischenablage kopiert')),
+    );
   }
 
   Future<void> _send() async {
@@ -296,6 +385,11 @@ class _ChatScreenState extends State<ChatScreen> {
               ),
             ),
           IconButton(
+            icon: const Icon(Icons.ios_share),
+            tooltip: 'Als Markdown exportieren',
+            onPressed: _exportMarkdown,
+          ),
+          IconButton(
             icon: const Icon(Icons.tune),
             tooltip: 'Chat-Einstellungen',
             onPressed: _showSettings,
@@ -314,7 +408,19 @@ class _ChatScreenState extends State<ChatScreen> {
                     itemCount: messages.length + (_isStreaming ? 1 : 0),
                     itemBuilder: (_, i) {
                       if (i < messages.length) {
-                        return MessageBubble(message: messages[i]);
+                        final m = messages[i];
+                        final isLastAssistant = m.role == 'assistant' &&
+                            i == messages.length - 1 &&
+                            !_isStreaming;
+                        return MessageBubble(
+                          message: m,
+                          onEdit: (m.role == 'user' && !_sending)
+                              ? () => _editMessage(m)
+                              : null,
+                          onRegenerate: (isLastAssistant && !_sending)
+                              ? _regenerate
+                              : null,
+                        );
                       }
                       // Streaming-Bubble am Ende
                       return Padding(
@@ -328,6 +434,26 @@ class _ChatScreenState extends State<ChatScreen> {
                   ),
           ),
 
+          // Tool-Bestätigung (wenn das Modell ein bestätigungspflichtiges Tool nutzen will)
+          if (_pendingConfirm != null)
+            _ToolConfirmCard(
+              name: _pendingConfirm!['name'] as String,
+              arguments: _pendingConfirm!['arguments'] as Map<String, dynamic>,
+              onApprove: () => _respondConfirm(true),
+              onReject: () => _respondConfirm(false),
+            ),
+
+          // Stop-Button während des Streamings
+          if (_isStreaming && _pendingConfirm == null)
+            Padding(
+              padding: const EdgeInsets.only(bottom: 4),
+              child: OutlinedButton.icon(
+                onPressed: _stopGeneration,
+                icon: const Icon(Icons.stop_circle_outlined, size: 18),
+                label: const Text('Generierung stoppen'),
+              ),
+            ),
+
           // Eingabe-Bereich
           _InputBar(
             controller: _inputCtrl,
@@ -338,6 +464,88 @@ class _ChatScreenState extends State<ChatScreen> {
                 : _selectedModel == null
                     ? 'Bitte ein Modell auswählen...'
                     : 'Nachricht eingeben...',
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+
+/// Karte die fragt ob ein bestätigungspflichtiges Tool ausgeführt werden darf.
+class _ToolConfirmCard extends StatelessWidget {
+  final String name;
+  final Map<String, dynamic> arguments;
+  final VoidCallback onApprove;
+  final VoidCallback onReject;
+
+  const _ToolConfirmCard({
+    required this.name,
+    required this.arguments,
+    required this.onApprove,
+    required this.onReject,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final argsText = const JsonEncoder.withIndent('  ').convert(arguments);
+    return Container(
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      padding: const EdgeInsets.all(14),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHigh,
+        borderRadius: BorderRadius.circular(14),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.5)),
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.shield_outlined, size: 18, color: cs.primary),
+              const SizedBox(width: 8),
+              Expanded(
+                child: Text('Aktion bestätigen: $name',
+                    style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w600)),
+              ),
+            ],
+          ),
+          const SizedBox(height: 4),
+          Text('Die KI möchte folgendes ausführen:',
+              style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant)),
+          const SizedBox(height: 8),
+          Container(
+            width: double.infinity,
+            padding: const EdgeInsets.all(10),
+            decoration: BoxDecoration(
+              color: cs.surface,
+              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: cs.outlineVariant),
+            ),
+            child: SelectableText(
+              argsText,
+              style: const TextStyle(fontFamily: 'monospace', fontSize: 12.5),
+            ),
+          ),
+          const SizedBox(height: 10),
+          Row(
+            mainAxisAlignment: MainAxisAlignment.end,
+            children: [
+              TextButton.icon(
+                onPressed: onReject,
+                icon: const Icon(Icons.close, size: 18),
+                label: const Text('Ablehnen'),
+                style: TextButton.styleFrom(foregroundColor: cs.error),
+              ),
+              const SizedBox(width: 8),
+              FilledButton.icon(
+                onPressed: onApprove,
+                icon: const Icon(Icons.check, size: 18),
+                label: const Text('Ausführen'),
+              ),
+            ],
           ),
         ],
       ),
@@ -364,39 +572,106 @@ class _InputBar extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
+    final cs = theme.colorScheme;
     return Container(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 16),
+      padding: const EdgeInsets.fromLTRB(16, 10, 16, 16),
       decoration: BoxDecoration(
-        color: theme.colorScheme.surface,
-        border: Border(top: BorderSide(color: theme.colorScheme.outlineVariant)),
+        color: cs.surface,
+        border: Border(top: BorderSide(color: cs.outlineVariant)),
       ),
       child: Row(
+        crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
-            child: TextField(
-              controller: controller,
-              enabled: enabled,
-              minLines: 1,
-              maxLines: 6,
-              textInputAction: TextInputAction.newline,
-              decoration: InputDecoration(
-                hintText: hint,
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(24)),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
+            child: Focus(
+              // Enter = senden, Shift+Enter = Zeilenumbruch
+              onKeyEvent: (node, event) {
+                final isEnter = event.logicalKey == LogicalKeyboardKey.enter ||
+                    event.logicalKey == LogicalKeyboardKey.numpadEnter;
+                if (event is KeyDownEvent &&
+                    isEnter &&
+                    !HardwareKeyboard.instance.isShiftPressed) {
+                  if (enabled) onSend();
+                  return KeyEventResult.handled; // verhindert Umbruch
+                }
+                return KeyEventResult.ignored; // Shift+Enter → normaler Umbruch
+              },
+              child: TextField(
+                controller: controller,
+                enabled: enabled,
+                minLines: 1,
+                maxLines: 6,
+                keyboardType: TextInputType.multiline,
+                textInputAction: TextInputAction.newline,
+                decoration: InputDecoration(
+                  hintText: hint,
+                  filled: true,
+                  fillColor: cs.surfaceContainerHigh,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide.none,
+                  ),
+                  enabledBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide(color: cs.outlineVariant),
+                  ),
+                  focusedBorder: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(24),
+                    borderSide: BorderSide(color: cs.primary, width: 1.6),
+                  ),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 18, vertical: 12),
+                ),
               ),
-              onSubmitted: (_) => onSend(),
             ),
           ),
-          const SizedBox(width: 8),
-          FilledButton(
-            onPressed: enabled ? onSend : null,
-            style: FilledButton.styleFrom(
-              shape: const CircleBorder(),
-              padding: const EdgeInsets.all(14),
-            ),
-            child: const Icon(Icons.send),
-          ),
+          const SizedBox(width: 10),
+          _SendButton(enabled: enabled, onSend: onSend),
         ],
+      ),
+    );
+  }
+}
+
+/// Runder Senden-Button mit Akzent-Verlauf (deaktiviert = flach).
+class _SendButton extends StatelessWidget {
+  final bool enabled;
+  final VoidCallback onSend;
+  const _SendButton({required this.enabled, required this.onSend});
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return AnimatedOpacity(
+      duration: const Duration(milliseconds: 150),
+      opacity: enabled ? 1 : 0.5,
+      child: Material(
+        color: Colors.transparent,
+        shape: const CircleBorder(),
+        clipBehavior: Clip.antiAlias,
+        child: Ink(
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            gradient: enabled ? NexusColors.accentGradient : null,
+            color: enabled ? null : cs.surfaceContainerHighest,
+            boxShadow: enabled
+                ? [
+                    BoxShadow(
+                      color: NexusColors.seed.withValues(alpha: 0.35),
+                      blurRadius: 12,
+                      offset: const Offset(0, 3),
+                    ),
+                  ]
+                : null,
+          ),
+          child: InkWell(
+            onTap: enabled ? onSend : null,
+            child: const SizedBox(
+              width: 48,
+              height: 48,
+              child: Icon(Icons.arrow_upward_rounded, color: Colors.white, size: 22),
+            ),
+          ),
+        ),
       ),
     );
   }

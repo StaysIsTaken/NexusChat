@@ -330,7 +330,12 @@ class _ProviderDialogState extends State<_ProviderDialog> {
               const SizedBox(height: 12),
               TextFormField(
                 controller: _apiKeyCtrl,
-                decoration: const InputDecoration(labelText: 'API Key'),
+                decoration: InputDecoration(
+                  labelText: 'API Key',
+                  helperText: (widget.existing?.hasApiKey ?? false)
+                      ? 'Schlüssel gesetzt – leer lassen zum Beibehalten'
+                      : null,
+                ),
                 obscureText: true,
               ),
               const SizedBox(height: 12),

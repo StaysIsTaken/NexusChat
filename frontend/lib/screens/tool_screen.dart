@@ -149,9 +149,18 @@ class _ToolServerCard extends StatelessWidget {
           child: Icon(_typeIcon(server.type),
               color: theme.colorScheme.onTertiaryContainer, size: 20),
         ),
-        title: Text(server.name),
+        title: Row(
+          children: [
+            Flexible(child: Text(server.name, overflow: TextOverflow.ellipsis)),
+            if (server.requiresConfirmation) ...[
+              const SizedBox(width: 6),
+              Icon(Icons.shield_outlined, size: 15, color: theme.colorScheme.primary),
+            ],
+          ],
+        ),
         subtitle: Text(
-          '${server.type.toUpperCase()}${server.url != null ? " · ${server.url}" : ""}',
+          '${server.type.toUpperCase()}${server.url != null ? " · ${server.url}" : ""}'
+          '${server.requiresConfirmation ? " · Bestätigung erforderlich" : ""}',
           style: theme.textTheme.bodySmall,
         ),
         trailing: Row(
@@ -258,6 +267,7 @@ class _AddServerDialogState extends State<_AddServerDialog> {
   final _configCtrl = TextEditingController();
   String _type = 'mcp';
   bool _saving = false;
+  bool _requiresConfirmation = false;
 
   @override
   void initState() {
@@ -269,6 +279,7 @@ class _AddServerDialogState extends State<_AddServerDialog> {
       _apiKeyCtrl.text = s.apiKey ?? '';
       _configCtrl.text = const JsonEncoder.withIndent('  ').convert(s.config);
       _type = s.type;
+      _requiresConfirmation = s.requiresConfirmation;
     } else {
       _configCtrl.text = '{}';
     }
@@ -296,6 +307,7 @@ class _AddServerDialogState extends State<_AddServerDialog> {
       'url': _urlCtrl.text.trim().isEmpty ? null : _urlCtrl.text.trim(),
       'api_key': _apiKeyCtrl.text.trim().isEmpty ? null : _apiKeyCtrl.text.trim(),
       'config': config,
+      'requires_confirmation': _requiresConfirmation,
     };
 
     try {
@@ -355,10 +367,26 @@ class _AddServerDialogState extends State<_AddServerDialog> {
                 const SizedBox(height: 12),
                 TextFormField(
                   controller: _apiKeyCtrl,
-                  decoration: const InputDecoration(labelText: 'API Key (optional)'),
+                  decoration: InputDecoration(
+                    labelText: 'API Key (optional)',
+                    helperText: (widget.existing?.hasApiKey ?? false)
+                        ? 'Schlüssel gesetzt – leer lassen zum Beibehalten'
+                        : null,
+                  ),
                   obscureText: true,
                 ),
-                const SizedBox(height: 12),
+                const SizedBox(height: 4),
+                SwitchListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: const Text('Bestätigung vor Ausführung'),
+                  subtitle: const Text(
+                    'Der Nutzer muss jeden Aufruf dieses Tools manuell bestätigen.',
+                    style: TextStyle(fontSize: 12),
+                  ),
+                  value: _requiresConfirmation,
+                  onChanged: (v) => setState(() => _requiresConfirmation = v),
+                ),
+                const SizedBox(height: 8),
                 TextFormField(
                   controller: _configCtrl,
                   decoration: const InputDecoration(

@@ -7,6 +7,7 @@ class AppProvider {
   final String type;
   final String? baseUrl;
   final String? apiKey;
+  final bool hasApiKey;
   final String? defaultModel;
   final Map<String, dynamic> customHeaders;
   final bool isEnabled;
@@ -18,6 +19,7 @@ class AppProvider {
     required this.type,
     this.baseUrl,
     this.apiKey,
+    this.hasApiKey = false,
     this.defaultModel,
     this.customHeaders = const {},
     this.isEnabled = true,
@@ -30,6 +32,7 @@ class AppProvider {
         type: json['type'] as String,
         baseUrl: json['base_url'] as String?,
         apiKey: json['api_key'] as String?,
+        hasApiKey: json['has_api_key'] as bool? ?? false,
         defaultModel: json['default_model'] as String?,
         customHeaders: (json['custom_headers'] as Map<String, dynamic>?) ?? {},
         isEnabled: json['is_enabled'] as bool? ?? true,
@@ -74,8 +77,10 @@ class ToolServer {
   final String type; // mcp | rest | custom
   final String? url;
   final String? apiKey;
+  final bool hasApiKey;
   final Map<String, dynamic> config;
   final bool isEnabled;
+  final bool requiresConfirmation;
   final String? createdAt;
 
   const ToolServer({
@@ -84,8 +89,10 @@ class ToolServer {
     required this.type,
     this.url,
     this.apiKey,
+    this.hasApiKey = false,
     this.config = const {},
     this.isEnabled = true,
+    this.requiresConfirmation = false,
     this.createdAt,
   });
 
@@ -95,8 +102,10 @@ class ToolServer {
         type: json['type'] as String,
         url: json['url'] as String?,
         apiKey: json['api_key'] as String?,
+        hasApiKey: json['has_api_key'] as bool? ?? false,
         config: (json['config'] as Map<String, dynamic>?) ?? {},
         isEnabled: json['is_enabled'] as bool? ?? true,
+        requiresConfirmation: json['requires_confirmation'] as bool? ?? false,
         createdAt: json['created_at'] as String?,
       );
 
@@ -244,6 +253,7 @@ class AppUser {
   final String id;
   final String username;
   final String role; // admin | user
+  final bool mustChangePassword;
   final List<String> providerIds;
   final List<String> toolIds;
 
@@ -251,6 +261,7 @@ class AppUser {
     required this.id,
     required this.username,
     required this.role,
+    this.mustChangePassword = false,
     this.providerIds = const [],
     this.toolIds = const [],
   });
@@ -261,6 +272,7 @@ class AppUser {
         id: json['id'] as String,
         username: json['username'] as String,
         role: json['role'] as String? ?? 'user',
+        mustChangePassword: json['must_change_password'] as bool? ?? false,
         providerIds: List<String>.from(json['provider_ids'] as List? ?? []),
         toolIds: List<String>.from(json['tool_ids'] as List? ?? []),
       );
@@ -268,7 +280,7 @@ class AppUser {
 
 
 /// WebSocket-Event-Typen vom Backend
-enum WsEventType { token, toolStart, toolEnd, done, error }
+enum WsEventType { token, toolStart, toolEnd, toolConfirm, title, done, error }
 
 class WsEvent {
   final WsEventType type;
@@ -278,6 +290,7 @@ class WsEvent {
   final String? result;    // für tool_end
   final String? message;   // für error
   final List<dynamic>? toolCalls; // für done
+  final String? title;     // für title
 
   const WsEvent({
     required this.type,
@@ -287,6 +300,7 @@ class WsEvent {
     this.result,
     this.message,
     this.toolCalls,
+    this.title,
   });
 
   factory WsEvent.fromJson(Map<String, dynamic> json) {
@@ -295,6 +309,8 @@ class WsEvent {
       'token' => WsEventType.token,
       'tool_start' => WsEventType.toolStart,
       'tool_end' => WsEventType.toolEnd,
+      'tool_confirm' => WsEventType.toolConfirm,
+      'title' => WsEventType.title,
       'done' => WsEventType.done,
       'error' => WsEventType.error,
       _ => WsEventType.error,
@@ -307,6 +323,7 @@ class WsEvent {
       result: json['result'] as String?,
       message: json['message'] as String?,
       toolCalls: json['tool_calls'] as List?,
+      title: json['title'] as String?,
     );
   }
 }

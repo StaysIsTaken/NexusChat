@@ -19,22 +19,26 @@ WebSocket:
                   {"type": "error",      "message": "..."}
 """
 
+import asyncio
 import json
 import logging
+import re
 from datetime import datetime
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from models import Chat, Message, Provider, ToolServer, User, get_session, async_session_maker
 from core.plugin_loader import get_provider
 from core.tool_caller import ToolCaller, load_active_tools
+from providers.base import ChatMessage
 from core.auth import (
     authenticate_token, get_current_user, user_provider_ids, user_tool_ids,
 )
+from core.crypto import decrypt_secret
 
 logger = logging.getLogger(__name__)
 
@@ -163,6 +167,80 @@ async def delete_chat(
     await db.commit()
 
 
+class EditMessage(BaseModel):
+    message_id: str
+    content: str
+
+
+@router.post("/api/chats/{chat_id}/edit_message")
+async def edit_message(
+    chat_id: str,
+    data: EditMessage,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """
+    Bearbeitet eine (Nutzer-)Nachricht und entfernt alle nachfolgenden Nachrichten.
+    Danach kann der Client per WebSocket-'regenerate' eine neue Antwort anfordern.
+    """
+    chat = await db.get(Chat, chat_id)
+    if not chat or chat.user_id != user.id:
+        raise HTTPException(404, "Chat nicht gefunden")
+
+    msg = await db.get(Message, data.message_id)
+    if not msg or msg.chat_id != chat_id:
+        raise HTTPException(404, "Nachricht nicht gefunden")
+
+    # Alles nach dieser Nachricht löschen, dann Inhalt aktualisieren
+    await db.execute(
+        delete(Message).where(
+            Message.chat_id == chat_id, Message.timestamp > msg.timestamp
+        )
+    )
+    msg.content = data.content
+    chat.updated_at = datetime.utcnow()
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/api/search")
+async def search_messages(
+    q: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Volltextsuche über alle Nachrichten der eigenen Chats."""
+    query = q.strip()
+    if not query:
+        return []
+    # Chats des Nutzers
+    chat_rows = await db.execute(select(Chat).where(Chat.user_id == user.id))
+    chats = {c.id: c for c in chat_rows.scalars().all()}
+    if not chats:
+        return []
+    msg_rows = await db.execute(
+        select(Message)
+        .where(Message.chat_id.in_(list(chats.keys())))
+        .where(Message.content.ilike(f"%{query}%"))
+        .order_by(Message.timestamp.desc())
+    )
+    seen: dict = {}
+    for m in msg_rows.scalars().all():
+        if m.chat_id in seen:
+            continue
+        chat = chats[m.chat_id]
+        snippet = m.content.strip().replace("\n", " ")
+        if len(snippet) > 120:
+            snippet = snippet[:120] + "…"
+        seen[m.chat_id] = {
+            "id": chat.id,
+            "title": chat.title,
+            "updated_at": chat.updated_at.isoformat() if chat.updated_at else None,
+            "snippet": snippet,
+        }
+    return list(seen.values())
+
+
 # ── WebSocket ───────────────────────────────────────────────────────────────
 
 @router.websocket("/ws/chat/{chat_id}")
@@ -194,7 +272,7 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
 
     try:
         while True:
-            # Warte auf Nachricht vom Client
+            # Warte auf eine Chat-Nachricht vom Client
             raw = await websocket.receive_text()
             try:
                 data = json.loads(raw)
@@ -202,15 +280,69 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
                 await websocket.send_json({"type": "error", "message": "Ungültiges JSON"})
                 continue
 
-            user_content = data.get("content", "").strip()
-            if not user_content:
-                continue
+            user_content = (data.get("content") or "").strip()
+            is_regenerate = data.get("type") == "regenerate"
+            if not user_content and not is_regenerate:
+                continue  # Steuernachrichten außerhalb einer Generierung ignorieren
 
-            # Eigene Session für diesen Request (nicht WebSocket-lebendig)
-            async with async_session_maker() as db:
-                await _handle_chat_message(
-                    websocket, db, chat_id, user_content, user_id, user_role
+            # Pro Turn: Abbruch-Signal, Entscheidungs-Queue (Tool-Bestätigung), Disconnect-Flag
+            stop_event = asyncio.Event()
+            decision_queue: asyncio.Queue = asyncio.Queue()
+            client_gone = asyncio.Event()
+
+            async def confirm(name: str, args: dict) -> bool:
+                """Fragt den Client ob ein Tool ausgeführt werden darf."""
+                try:
+                    await websocket.send_json(
+                        {"type": "tool_confirm", "name": name, "arguments": args}
+                    )
+                except Exception:
+                    return False
+                getter = asyncio.create_task(decision_queue.get())
+                gone = asyncio.create_task(client_gone.wait())
+                done, _ = await asyncio.wait(
+                    {getter, gone}, return_when=asyncio.FIRST_COMPLETED
                 )
+                if getter in done:
+                    gone.cancel()
+                    return bool(getter.result())
+                getter.cancel()
+                return False  # Client weg → Ausführung ablehnen
+
+            async def generate():
+                async with async_session_maker() as db:
+                    await _handle_chat_message(
+                        websocket, db, chat_id, user_content, user_id, user_role,
+                        stop_event, confirm, is_regenerate,
+                    )
+
+            gen_task = asyncio.create_task(generate())
+
+            # Während generiert wird gleichzeitig auf 'stop' und 'tool_decision' hören
+            while not gen_task.done():
+                reader = asyncio.create_task(websocket.receive_text())
+                done, _ = await asyncio.wait(
+                    {gen_task, reader}, return_when=asyncio.FIRST_COMPLETED
+                )
+                if reader in done:
+                    try:
+                        ctrl = json.loads(reader.result())
+                    except WebSocketDisconnect:
+                        client_gone.set()
+                        stop_event.set()
+                        await gen_task  # Generierung sauber beenden (speichert Teilantwort)
+                        raise
+                    except Exception:
+                        continue
+                    ct = ctrl.get("type")
+                    if ct == "stop":
+                        stop_event.set()
+                    elif ct == "tool_decision":
+                        decision_queue.put_nowait(bool(ctrl.get("approved")))
+                else:
+                    reader.cancel()  # Generierung fertig → laufenden Read abbrechen
+
+            await gen_task  # eventuelle Exceptions propagieren
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket getrennt: chat_id={chat_id}")
@@ -229,6 +361,9 @@ async def _handle_chat_message(
     user_content: str,
     user_id: str,
     user_role: str,
+    stop_event: Optional[asyncio.Event] = None,
+    confirm=None,
+    regenerate: bool = False,
 ):
     """Verarbeitet eine eingehende Nachricht und streamt die Antwort."""
 
@@ -238,14 +373,23 @@ async def _handle_chat_message(
         await websocket.send_json({"type": "error", "message": "Chat nicht gefunden"})
         return
 
-    # Nutzernachricht in DB speichern
-    user_msg = Message(
-        chat_id=chat_id,
-        role="user",
-        content=user_content,
-    )
-    db.add(user_msg)
-    await db.commit()
+    if regenerate:
+        # Neu generieren: am Ende stehende Assistenten-Nachrichten entfernen,
+        # damit der Verlauf wieder mit der letzten Nutzernachricht endet.
+        existing = (await db.execute(
+            select(Message).where(Message.chat_id == chat_id).order_by(Message.timestamp)
+        )).scalars().all()
+        for m in reversed(existing):
+            if m.role == "assistant":
+                await db.delete(m)
+            else:
+                break
+        await db.commit()
+    else:
+        # Nutzernachricht in DB speichern
+        user_msg = Message(chat_id=chat_id, role="user", content=user_content)
+        db.add(user_msg)
+        await db.commit()
 
     # Bisherigen Gesprächsverlauf laden (ohne System-Nachrichten – die kommen via system_prompt)
     msg_result = await db.execute(
@@ -280,7 +424,9 @@ async def _handle_chat_message(
             )
             return
 
-    provider_instance = get_provider(provider_record.type, provider_record.to_dict())
+    provider_config = provider_record.to_dict()
+    provider_config["api_key"] = await decrypt_secret(db, provider_record.api_key)
+    provider_instance = get_provider(provider_record.type, provider_config)
     if not provider_instance:
         await websocket.send_json({"type": "error", "message": "Provider-Typ unbekannt"})
         return
@@ -295,13 +441,20 @@ async def _handle_chat_message(
     active_tools = []
     if tool_server_ids:
         all_servers_result = await db.execute(select(ToolServer))
-        all_servers = [s.to_dict() for s in all_servers_result.scalars().all()]
+        all_servers = []
+        for s in all_servers_result.scalars().all():
+            sd = s.to_dict()
+            sd["api_key"] = await decrypt_secret(db, s.api_key)  # für Tool-Aufrufe nötig
+            all_servers.append(sd)
         active_tools = await load_active_tools(tool_server_ids, all_servers)
 
     # Tool-Caller initialisieren und Antwort streamen
     tool_caller = ToolCaller(tools=active_tools)
     full_response = ""
     all_tool_calls = []
+    # Erster Austausch? → danach automatisch einen Titel erzeugen
+    first_exchange = chat.title == "Neues Gespräch" and len(history_msgs) <= 1
+    first_user_content = history_msgs[0].content if history_msgs else user_content
 
     # Wenn der Client mitten im Stream wegnavigiert, bricht send_json ab.
     # Wir wollen die Generierung trotzdem zu Ende führen und die Antwort
@@ -326,6 +479,8 @@ async def _handle_chat_message(
         provider=provider_instance,
         model=model,
         system_prompt=chat.system_prompt,
+        stop_event=stop_event,
+        confirm=confirm,
     ):
         if event["type"] == "token":
             full_response += event["content"]
@@ -347,9 +502,45 @@ async def _handle_chat_message(
                 ],
             )
             db.add(assistant_msg)
-            if chat.title == "Neues Gespräch" and len(history_msgs) == 1:
-                chat.title = user_content[:50] + ("..." if len(user_content) > 50 else "")
+            # Sofort-Fallback-Titel (wird ggf. gleich durch LLM-Titel ersetzt)
+            if first_exchange:
+                chat.title = first_user_content[:50] + ("…" if len(first_user_content) > 50 else "")
             chat.updated_at = datetime.utcnow()
             await db.commit()
 
         await safe_send(event)
+
+    # Auto-Titel per LLM (best effort, nach dem Stream)
+    if first_exchange and full_response.strip():
+        title = await _generate_title(
+            provider_instance, model, first_user_content, full_response
+        )
+        if title:
+            chat.title = title
+            await db.commit()
+            await safe_send({"type": "title", "title": title})
+
+
+async def _generate_title(provider, model, user_msg: str, assistant_msg: str) -> str:
+    """Erzeugt einen kurzen Gesprächstitel. Bei Fehlern leerer String."""
+    prompt = (
+        "Erzeuge einen sehr kurzen, prägnanten Titel (höchstens 5 Wörter, "
+        "keine Anführungszeichen, kein Satzzeichen am Ende) für dieses Gespräch:\n\n"
+        f"Nutzer: {user_msg[:400]}\n"
+        f"Assistent: {assistant_msg[:400]}"
+    )
+    out = ""
+    try:
+        async for tok in provider.chat([ChatMessage(role="user", content=prompt)], model=model):
+            out += tok
+            if len(out) > 240:
+                break
+    except Exception as e:
+        logger.info(f"Auto-Titel fehlgeschlagen: {e}")
+        return ""
+    # Think-Blöcke und Anführungszeichen entfernen, erste Zeile nehmen
+    out = re.sub(r"<think>.*?</think>", "", out, flags=re.DOTALL | re.IGNORECASE)
+    out = out.strip().strip('"').strip("'").strip()
+    if not out:
+        return ""
+    return out.split("\n")[0].strip()[:60]

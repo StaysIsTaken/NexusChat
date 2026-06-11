@@ -69,6 +69,7 @@ class BaseTool(ABC):
     name: str = "base_tool"
     description: str = "Base Tool"
     parameters: Dict[str, ToolParameter] = {}
+    requires_confirmation: bool = False  # True → Ausführung muss vom Nutzer bestätigt werden
 
     def get_info(self) -> ToolInfo:
         """Gibt die vollständige Tool-Beschreibung zurück."""

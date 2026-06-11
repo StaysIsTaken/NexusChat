@@ -9,9 +9,11 @@
       "dependencies": [
         "cupertino_icons",
         "flutter",
+        "flutter_highlight",
         "flutter_markdown",
         "http",
         "intl",
+        "markdown",
         "provider",
         "shared_preferences",
         "uuid",
@@ -80,6 +82,22 @@
         "shared_preferences_platform_interface",
         "shared_preferences_web",
         "shared_preferences_windows"
+      ]
+    },
+    {
+      "name": "markdown",
+      "version": "7.3.1",
+      "dependencies": [
+        "args",
+        "meta"
+      ]
+    },
+    {
+      "name": "flutter_highlight",
+      "version": "0.7.0",
+      "dependencies": [
+        "flutter",
+        "highlight"
       ]
     },
     {
@@ -293,11 +311,15 @@
       ]
     },
     {
-      "name": "markdown",
-      "version": "7.3.1",
+      "name": "args",
+      "version": "2.7.0",
+      "dependencies": []
+    },
+    {
+      "name": "highlight",
+      "version": "0.7.0",
       "dependencies": [
-        "args",
-        "meta"
+        "collection"
       ]
     },
     {
@@ -454,11 +476,6 @@
         "path_provider_platform_interface",
         "xdg_directories"
       ]
-    },
-    {
-      "name": "args",
-      "version": "2.7.0",
-      "dependencies": []
     },
     {
       "name": "vm_service",

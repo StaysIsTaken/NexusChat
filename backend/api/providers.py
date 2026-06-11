@@ -24,6 +24,14 @@ from core.plugin_loader import get_provider, list_available_providers
 from core.auth import (
     can_use_provider, get_current_user, require_admin, user_provider_ids,
 )
+from core.crypto import decrypt_secret, encrypt_secret
+
+
+async def _provider_config(db, record: Provider) -> dict:
+    """Provider-Konfiguration mit entschlüsseltem API-Key (für interne Nutzung)."""
+    cfg = record.to_dict()
+    cfg["api_key"] = await decrypt_secret(db, record.api_key)
+    return cfg
 
 router = APIRouter(prefix="/api/providers", tags=["providers"])
 
@@ -78,7 +86,7 @@ async def create_provider(
         name=data.name,
         type=data.type,
         base_url=data.base_url,
-        api_key=data.api_key,
+        api_key=await encrypt_secret(db, data.api_key),
         default_model=data.default_model,
         custom_headers=data.custom_headers or {},
         is_enabled=data.is_enabled,
@@ -114,7 +122,10 @@ async def update_provider(
     if not provider:
         raise HTTPException(404, "Provider nicht gefunden")
 
-    for field, value in data.model_dump(exclude_none=True).items():
+    fields = data.model_dump(exclude_none=True)
+    if "api_key" in fields:
+        fields["api_key"] = await encrypt_secret(db, fields["api_key"])
+    for field, value in fields.items():
         setattr(provider, field, value)
 
     await db.commit()
@@ -150,7 +161,7 @@ async def list_provider_models(
 
     provider_instance = get_provider(
         provider_record.type,
-        provider_record.to_dict(),
+        await _provider_config(db, provider_record),
     )
     if not provider_instance:
         raise HTTPException(400, f"Unbekannter Provider-Typ: {provider_record.type}")
@@ -174,7 +185,7 @@ async def test_provider(
 
     provider_instance = get_provider(
         provider_record.type,
-        provider_record.to_dict(),
+        await _provider_config(db, provider_record),
     )
     if not provider_instance:
         raise HTTPException(400, f"Unbekannter Provider-Typ: {provider_record.type}")

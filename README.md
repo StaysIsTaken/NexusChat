@@ -18,6 +18,31 @@ NexusChat ist mehrbenutzerfähig mit JWT-basierter Authentifizierung:
 
 Passwörter werden mit bcrypt gehasht, Tokens als JWT (HS256) signiert; das Secret wird beim ersten Start generiert und in der Datenbank gespeichert.
 
+## Funktionen im Überblick
+
+**Sicherheit**
+- API-Keys von Providern/Tools werden verschlüsselt gespeichert (Fernet) und nie an den Client ausgeliefert
+- Login-Rate-Limiting gegen Brute-Force
+- Erzwungener Passwortwechsel für neu angelegte Konten + Self-Service-Passwortänderung
+- DB-Backup-Download für den Admin
+
+**Chat**
+- Token-Streaming, Stop-Button (Teilantwort bleibt erhalten)
+- Nachricht bearbeiten & Antwort neu generieren
+- Kopieren pro Nachricht + Markdown-Export des ganzen Chats
+- Code-Blöcke mit Syntax-Highlighting und Copy-Button
+- Automatischer Chat-Titel per LLM
+- Volltextsuche über alle Nachrichten
+- Aufklappbare „Reasoning"-Blöcke (`<think>`) und Tool-Call-Anzeige
+
+**Tools**
+- Modell-unabhängiges Tool-Calling (nativ + XML-Fallback)
+- Optionale **Ausführungsbestätigung** pro Tool-Server: der Nutzer sieht vor der Ausführung genau, was getan werden soll, und bestätigt/lehnt ab
+
+**Admin**
+- Benutzerverwaltung mit gezielter Provider-/Tool-Zuweisung
+- Health-Dashboard: zeigt live, welche Provider/Tools erreichbar sind
+
 ## Schnellstart mit Docker (Full-Stack)
 
 Startet Backend **und** Web-Frontend zusammen:

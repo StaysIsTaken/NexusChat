@@ -7,6 +7,7 @@
 
 import 'package:flutter/material.dart';
 import '../models/models.dart';
+import '../theme.dart';
 import '../services/api_service.dart';
 
 class AuthScreen extends StatefulWidget {
@@ -115,8 +116,23 @@ class _AuthScreenState extends State<AuthScreen> {
                     mainAxisSize: MainAxisSize.min,
                     crossAxisAlignment: CrossAxisAlignment.stretch,
                     children: [
-                      Icon(Icons.hub, size: 56, color: cs.primary),
-                      const SizedBox(height: 16),
+                      Container(
+                        width: 72,
+                        height: 72,
+                        decoration: BoxDecoration(
+                          gradient: NexusColors.accentGradient,
+                          borderRadius: BorderRadius.circular(20),
+                          boxShadow: [
+                            BoxShadow(
+                              color: NexusColors.seed.withValues(alpha: 0.4),
+                              blurRadius: 24,
+                              offset: const Offset(0, 8),
+                            ),
+                          ],
+                        ),
+                        child: const Icon(Icons.auto_awesome, size: 36, color: Colors.white),
+                      ),
+                      const SizedBox(height: 20),
                       Text('NexusChat',
                           textAlign: TextAlign.center,
                           style: theme.textTheme.headlineSmall),

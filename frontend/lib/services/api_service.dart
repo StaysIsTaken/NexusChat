@@ -181,6 +181,20 @@ class ApiService {
 
   Future<void> deleteChat(String id) => _delete('/api/chats/$id');
 
+  /// Bearbeitet eine Nachricht und entfernt alle nachfolgenden.
+  Future<void> editMessage(String chatId, String messageId, String content) async {
+    await _post('/api/chats/$chatId/edit_message', {
+      'message_id': messageId,
+      'content': content,
+    });
+  }
+
+  /// Volltextsuche über alle Nachrichten. Gibt Chat-Treffer mit Snippet zurück.
+  Future<List<Map<String, dynamic>>> searchMessages(String query) async {
+    final data = await _get('/api/search?q=${Uri.encodeQueryComponent(query)}') as List;
+    return data.cast<Map<String, dynamic>>();
+  }
+
   // ── Auth ──────────────────────────────────────────────────────────────────
 
   Future<bool> authNeedsSetup() async {
@@ -208,6 +222,28 @@ class ApiService {
   Future<AppUser> getMe() async {
     final data = await _get('/api/auth/me') as Map<String, dynamic>;
     return AppUser.fromJson(data);
+  }
+
+  /// Eigenes Passwort ändern. Gibt neues Token + aktualisierten User zurück.
+  Future<(String, AppUser)> changeOwnPassword(String current, String newPassword) async {
+    final data = await _put('/api/auth/password', {
+      'current_password': current,
+      'new_password': newPassword,
+    }) as Map<String, dynamic>;
+    return (data['token'] as String, AppUser.fromJson(data['user'] as Map<String, dynamic>));
+  }
+
+  /// Status aller Provider und Tool-Server (nur Admin).
+  Future<List<Map<String, dynamic>>> getSystemHealth() async {
+    final data = await _get('/api/admin/health') as List;
+    return data.cast<Map<String, dynamic>>();
+  }
+
+  /// SQLite-Datenbank als Bytes herunterladen (nur Admin).
+  Future<List<int>> downloadBackup() async {
+    final resp = await http.get(Uri.parse('$baseUrl/api/admin/backup'), headers: _headers);
+    _checkStatus(resp);
+    return resp.bodyBytes;
   }
 
   // ── User-Verwaltung (Admin) ────────────────────────────────────────────────

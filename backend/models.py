@@ -25,7 +25,8 @@ from sqlalchemy.orm import DeclarativeBase, relationship
 # Datenbank-Datei im /data Verzeichnis (als Docker-Volume gemountet)
 _DATA_DIR = os.path.join(os.path.dirname(__file__), "data")
 os.makedirs(_DATA_DIR, exist_ok=True)
-DATABASE_URL = f"sqlite+aiosqlite:///{os.path.join(_DATA_DIR, 'nexuschat.db')}"
+DB_PATH = os.path.join(_DATA_DIR, "nexuschat.db")
+DATABASE_URL = f"sqlite+aiosqlite:///{DB_PATH}"
 
 engine = create_async_engine(DATABASE_URL, echo=False)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
@@ -44,6 +45,7 @@ class User(Base):
     username = Column(String, unique=True, nullable=False)
     password_hash = Column(String, nullable=False)
     role = Column(String, nullable=False, default="user")   # admin | user
+    must_change_password = Column(Boolean, default=False)   # erzwungener Wechsel beim 1. Login
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -51,6 +53,7 @@ class User(Base):
             "id": self.id,
             "username": self.username,
             "role": self.role,
+            "must_change_password": bool(self.must_change_password),
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -94,7 +97,8 @@ class Provider(Base):
             "name": self.name,
             "type": self.type,
             "base_url": self.base_url,
-            "api_key": self.api_key,       # Frontend zeigt nur ob vorhanden, nicht den Wert
+            "api_key": None,               # nie an den Client ausliefern
+            "has_api_key": bool(self.api_key),
             "default_model": self.default_model,
             "custom_headers": self.custom_headers or {},
             "is_enabled": self.is_enabled,
@@ -112,6 +116,7 @@ class ToolServer(Base):
     api_key = Column(String, nullable=True)
     config = Column(JSON, default=lambda: {})    # Typ-spezifische Konfiguration
     is_enabled = Column(Boolean, default=True)
+    requires_confirmation = Column(Boolean, default=False)  # Ausführung muss bestätigt werden
     created_at = Column(DateTime, default=datetime.utcnow)
 
     def to_dict(self) -> dict:
@@ -120,9 +125,11 @@ class ToolServer(Base):
             "name": self.name,
             "type": self.type,
             "url": self.url,
-            "api_key": self.api_key,
+            "api_key": None,               # nie an den Client ausliefern
+            "has_api_key": bool(self.api_key),
             "config": self.config or {},
             "is_enabled": self.is_enabled,
+            "requires_confirmation": bool(self.requires_confirmation),
             "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
@@ -205,6 +212,18 @@ def _migrate(sync_conn):
         chat_cols = [c["name"] for c in insp.get_columns("chats")]
         if "user_id" not in chat_cols:
             sync_conn.execute(text("ALTER TABLE chats ADD COLUMN user_id VARCHAR"))
+    if "users" in existing_tables:
+        user_cols = [c["name"] for c in insp.get_columns("users")]
+        if "must_change_password" not in user_cols:
+            sync_conn.execute(
+                text("ALTER TABLE users ADD COLUMN must_change_password BOOLEAN DEFAULT 0")
+            )
+    if "tool_servers" in existing_tables:
+        ts_cols = [c["name"] for c in insp.get_columns("tool_servers")]
+        if "requires_confirmation" not in ts_cols:
+            sync_conn.execute(
+                text("ALTER TABLE tool_servers ADD COLUMN requires_confirmation BOOLEAN DEFAULT 0")
+            )
 
 
 async def init_db():

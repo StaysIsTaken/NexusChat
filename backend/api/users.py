@@ -96,6 +96,7 @@ async def create_user(
         username=username,
         password_hash=hash_password(data.password),
         role="user",
+        must_change_password=True,  # beim ersten Login Passwort ändern
     )
     db.add(user)
     await db.commit()
@@ -136,6 +137,7 @@ async def reset_password(
     if not data.password:
         raise HTTPException(400, "Passwort erforderlich.")
     user.password_hash = hash_password(data.password)
+    user.must_change_password = True  # User muss es beim nächsten Login ändern
     await db.commit()
     return {"success": True}
 
