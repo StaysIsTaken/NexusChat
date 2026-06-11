@@ -28,6 +28,8 @@ from api.chat import router as chat_router
 from api.providers import router as providers_router
 from api.tools import router as tools_router
 from api.settings import router as settings_router
+from api.auth import router as auth_router
+from api.users import router as users_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -83,6 +85,8 @@ app.add_middleware(
 )
 
 # Router registrieren
+app.include_router(auth_router)
+app.include_router(users_router)
 app.include_router(chat_router)
 app.include_router(providers_router)
 app.include_router(tools_router)

@@ -15,7 +15,7 @@ from datetime import datetime
 from typing import Optional
 
 from sqlalchemy import (
-    Boolean, Column, DateTime, ForeignKey, JSON, String, Text
+    Boolean, Column, DateTime, ForeignKey, JSON, String, Table, Text, inspect, text
 )
 from sqlalchemy.ext.asyncio import (
     AsyncSession, async_sessionmaker, create_async_engine
@@ -33,6 +33,44 @@ async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 
 class Base(DeclarativeBase):
     pass
+
+
+# ── Benutzer & Zugriffszuweisungen ───────────────────────────────────────────
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(String, primary_key=True, default=lambda: str(uuid.uuid4()))
+    username = Column(String, unique=True, nullable=False)
+    password_hash = Column(String, nullable=False)
+    role = Column(String, nullable=False, default="user")   # admin | user
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    def to_dict(self) -> dict:
+        return {
+            "id": self.id,
+            "username": self.username,
+            "role": self.role,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+# Welche Provider/Tools ein User nutzen darf (vom Admin zugewiesen).
+# Bewusst als reine Tabellen (keine ORM-Relationship) – async SQLAlchemy
+# erlaubt kein Lazy-Loading über Relationships (MissingGreenlet).
+user_providers = Table(
+    "user_providers",
+    Base.metadata,
+    Column("user_id", String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("provider_id", String, ForeignKey("providers.id", ondelete="CASCADE"), primary_key=True),
+)
+
+user_tools = Table(
+    "user_tools",
+    Base.metadata,
+    Column("user_id", String, ForeignKey("users.id", ondelete="CASCADE"), primary_key=True),
+    Column("tool_server_id", String, ForeignKey("tool_servers.id", ondelete="CASCADE"), primary_key=True),
+)
 
 
 class Provider(Base):
@@ -96,6 +134,7 @@ class Chat(Base):
     title = Column(String, default="Neues Gespräch")
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+    user_id = Column(String, ForeignKey("users.id"), nullable=True)  # Besitzer des Chats
     provider_id = Column(String, ForeignKey("providers.id"), nullable=True)
     model_name = Column(String, nullable=True)
     active_tool_ids = Column(JSON, default=lambda: [])  # Liste von ToolServer-IDs
@@ -115,6 +154,7 @@ class Chat(Base):
             "title": self.title,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+            "user_id": self.user_id,
             "provider_id": self.provider_id,
             "model_name": self.model_name,
             "active_tool_ids": self.active_tool_ids or [],
@@ -157,10 +197,21 @@ class Settings(Base):
     value = Column(Text, nullable=True)
 
 
+def _migrate(sync_conn):
+    """Leichte Migration für bestehende DBs (SQLite ALTER TABLE)."""
+    insp = inspect(sync_conn)
+    existing_tables = insp.get_table_names()
+    if "chats" in existing_tables:
+        chat_cols = [c["name"] for c in insp.get_columns("chats")]
+        if "user_id" not in chat_cols:
+            sync_conn.execute(text("ALTER TABLE chats ADD COLUMN user_id VARCHAR"))
+
+
 async def init_db():
-    """Erstellt alle Tabellen falls sie nicht existieren."""
+    """Erstellt alle Tabellen falls sie nicht existieren und migriert bestehende."""
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await conn.run_sync(_migrate)
 
 
 async def get_session() -> AsyncSession:

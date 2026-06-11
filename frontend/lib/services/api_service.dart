@@ -19,11 +19,17 @@ class ApiException implements Exception {
 
 class ApiService {
   final String baseUrl;
+  final String? token;
 
-  ApiService({required this.baseUrl});
+  ApiService({required this.baseUrl, this.token});
+
+  /// Erzeugt eine Kopie mit anderem Token (z.B. nach Login/Logout).
+  ApiService withToken(String? token) =>
+      ApiService(baseUrl: baseUrl, token: token);
 
   Map<String, String> get _headers => {
         'Content-Type': 'application/json',
+        if (token != null && token!.isNotEmpty) 'Authorization': 'Bearer $token',
       };
 
   Future<dynamic> _get(String path) async {
@@ -174,6 +180,64 @@ class ApiService {
   }
 
   Future<void> deleteChat(String id) => _delete('/api/chats/$id');
+
+  // ── Auth ──────────────────────────────────────────────────────────────────
+
+  Future<bool> authNeedsSetup() async {
+    final data = await _get('/api/auth/status') as Map<String, dynamic>;
+    return data['needs_setup'] as bool? ?? false;
+  }
+
+  /// Gibt {token, user} zurück.
+  Future<(String, AppUser)> setupAdmin(String username, String password) async {
+    final data = await _post('/api/auth/setup', {
+      'username': username,
+      'password': password,
+    }) as Map<String, dynamic>;
+    return (data['token'] as String, AppUser.fromJson(data['user'] as Map<String, dynamic>));
+  }
+
+  Future<(String, AppUser)> login(String username, String password) async {
+    final data = await _post('/api/auth/login', {
+      'username': username,
+      'password': password,
+    }) as Map<String, dynamic>;
+    return (data['token'] as String, AppUser.fromJson(data['user'] as Map<String, dynamic>));
+  }
+
+  Future<AppUser> getMe() async {
+    final data = await _get('/api/auth/me') as Map<String, dynamic>;
+    return AppUser.fromJson(data);
+  }
+
+  // ── User-Verwaltung (Admin) ────────────────────────────────────────────────
+
+  Future<List<AppUser>> getUsers() async {
+    final data = await _get('/api/users') as List;
+    return data.map((e) => AppUser.fromJson(e as Map<String, dynamic>)).toList();
+  }
+
+  Future<AppUser> createUser(String username, String password) async {
+    final data = await _post('/api/users', {
+      'username': username,
+      'password': password,
+    });
+    return AppUser.fromJson(data as Map<String, dynamic>);
+  }
+
+  Future<void> deleteUser(String id) => _delete('/api/users/$id');
+
+  Future<void> resetUserPassword(String id, String password) async {
+    await _put('/api/users/$id/password', {'password': password});
+  }
+
+  Future<void> setUserProviders(String id, List<String> providerIds) async {
+    await _put('/api/users/$id/providers', {'ids': providerIds});
+  }
+
+  Future<void> setUserTools(String id, List<String> toolIds) async {
+    await _put('/api/users/$id/tools', {'ids': toolIds});
+  }
 
   // ── Settings ────────────────────────────────────────────────────────────
 

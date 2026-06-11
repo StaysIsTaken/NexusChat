@@ -4,23 +4,39 @@ Universelle, erweiterbare KI-Chat-Applikation mit Flutter (Desktop + Web) und se
 
 ## Das Problem das gelöst wird
 
-**Problem 1 – Tool-Calling:** Lokale Modelle unterstützen kein zuverlässiges Tool-Calling. NexusChat übernimmt Tool-Calling eigenständig im Backend – unabhängig vom Modell. Jedes Modell das Anweisungen folgen kann, kann Tools verwenden.
+**Problem 1 – Tool-Calling:** NexusChat steuert Tool-Calling eigenständig im Backend. Zwei Pfade: **nativ** über die Function-Calling-API des Providers (z.B. Ollama mit `llama3.2`) und als **Fallback** XML-Injektion in den System-Prompt für Modelle ohne native Unterstützung. Tool-Ausführung, Ergebnis-Rückführung und Mehrfach-Aufrufe übernimmt das Backend.
 
 **Problem 2 – Erweiterbarkeit:** Bestehende Apps sind auf wenige fest eingebaute Provider beschränkt. NexusChat ist ein offenes Plugin-System – neue Provider und Tools als Python-Dateien hinzufügen, kein Core-Eingriff nötig.
 
-## Schnellstart mit Docker
+## Benutzer & Rechte
+
+NexusChat ist mehrbenutzerfähig mit JWT-basierter Authentifizierung:
+
+- **Einmalige Einrichtung:** Solange kein Admin existiert, zeigt die App ein Setup-Formular. Der erste angelegte Account wird zum **Administrator**.
+- **Admin** kann Provider und Tools anlegen/verbinden, Benutzer erstellen und ihnen gezielt einzelne Provider/Tools zuweisen.
+- **Benutzer** sehen ausschließlich ihre eigenen Chats und nur die ihnen zugewiesenen Provider/Tools. Sie können selbst keine Provider/Tools anlegen.
+
+Passwörter werden mit bcrypt gehasht, Tokens als JWT (HS256) signiert; das Secret wird beim ersten Start generiert und in der Datenbank gespeichert.
+
+## Schnellstart mit Docker (Full-Stack)
+
+Startet Backend **und** Web-Frontend zusammen:
 
 ```bash
-# Repository klonen / Ordner aufrufen
 cd nexuschat
+docker compose up --build
 
-# Starten
-docker-compose up --build
-
-# Frontend: http://localhost:3000
+# Frontend:    http://localhost:3000   → beim ersten Aufruf Admin einrichten
 # Backend API: http://localhost:8099
-# API-Docs: http://localhost:8099/docs
+# API-Docs:    http://localhost:8099/docs
 ```
+
+> **Nur das Backend** (z.B. wenn das Frontend als native Desktop-App läuft):
+> ```bash
+> cd nexuschat/backend
+> docker compose up --build -d
+> ```
+> Siehe Abschnitt [Deployment](#deployment).
 
 ## Lokale Entwicklung
 
@@ -46,6 +62,41 @@ cd frontend
 flutter pub get
 flutter run -d chrome --web-port 3000
 ```
+
+## Deployment
+
+### Variante A – Full-Stack (Web-Frontend + Backend)
+```bash
+cd nexuschat
+docker compose up --build -d
+```
+Frontend auf Port `3000`, Backend auf `8099`. Das nginx im Frontend-Container proxied `/api` und `/ws` zum Backend.
+
+### Variante B – Nur Backend im Container + native Desktop-App
+Server (z.B. via Portainer oder direkt):
+```bash
+cd nexuschat/backend
+docker compose up --build -d        # Backend auf Port 8099
+```
+Native Windows-App bauen:
+```bash
+cd nexuschat/frontend
+flutter build windows --release
+# Ergebnis: build/windows/x64/runner/Release/  (gesamten Ordner weitergeben)
+```
+Die App fragt beim ersten Start nach Login/Setup. Die Backend-URL (`http://<server-ip>:8099`)
+wird in den App-Einstellungen hinterlegt und gespeichert.
+
+### Portainer (aus GitHub-Repo)
+1. **Stacks → Add stack → Repository**
+2. Repository-URL eintragen, Branch z.B. `refs/heads/main`
+3. **Compose path:** `nexuschat/backend/docker-compose.yml` (nur Backend) oder `nexuschat/docker-compose.yml` (Full-Stack)
+4. **Deploy** – Portainer klont, baut das Image und startet den Container.
+
+### Hinweise
+- **Daten bleiben erhalten:** Die SQLite-DB liegt im Named Volume `nexuschat-data`. Beim ersten Start ist sie leer → Admin einrichten, Provider/Tools anlegen.
+- **Ollama/MCP-Erreichbarkeit:** Läuft Ollama auf demselben Host wie der Container, nutze `http://host.docker.internal:11434` statt `localhost`. Bei einer anderen Maschine die LAN-IP eintragen.
+- Die DB (`backend/data/`) ist via `.gitignore`/`.dockerignore` ausgeschlossen und landet nie im Image oder Repo.
 
 ## Provider konfigurieren
 
@@ -149,9 +200,12 @@ Datei in `plugins/tools/` ablegen → Backend neu starten → fertig.
 nexuschat/
 ├── backend/
 │   ├── main.py                 # FastAPI App
-│   ├── models.py               # SQLite Datenmodelle
+│   ├── models.py               # SQLite Datenmodelle (User, Chats, Provider, Tools …)
+│   ├── Dockerfile
+│   ├── docker-compose.yml      # Nur-Backend-Deployment
 │   ├── core/
-│   │   ├── tool_caller.py      # Modell-unabhängiges Tool-Calling ⭐
+│   │   ├── tool_caller.py      # Tool-Calling: nativ (Ollama) + XML-Fallback ⭐
+│   │   ├── auth.py             # JWT, bcrypt, Zugriffskontrolle
 │   │   ├── mcp_client.py       # MCP Streamable HTTP Client
 │   │   └── plugin_loader.py    # Automatisches Plugin-Laden
 │   ├── providers/              # KI-Provider Implementierungen
@@ -164,34 +218,54 @@ nexuschat/
 │   │   ├── base.py             # BaseTool Interface
 │   │   └── rest_tool.py        # REST-API als Tool
 │   └── api/                    # API Endpoints
+│       ├── auth.py             # Setup / Login / Profil
+│       ├── users.py            # Benutzerverwaltung (Admin)
 │       ├── chat.py             # Chat + WebSocket Streaming
 │       ├── providers.py
 │       ├── tools.py
 │       └── settings.py
 ├── frontend/
+│   ├── Dockerfile              # Web-Build + nginx
+│   ├── nginx.conf
 │   └── lib/
-│       ├── main.dart           # App-Shell, Navigation
-│       ├── models/models.dart  # Dart Datenmodelle
+│       ├── main.dart           # App-Shell, Auth-Gate, rollenbasierte Navigation
+│       ├── models/models.dart  # Dart Datenmodelle (inkl. AppUser)
 │       ├── services/
-│       │   ├── api_service.dart
-│       │   └── websocket_service.dart
+│       │   ├── api_service.dart      # REST inkl. Token-Header
+│       │   └── websocket_service.dart # Stream + persistenter Socket-Manager
 │       ├── screens/
-│       │   ├── chat_screen.dart       # Chat mit Streaming
+│       │   ├── auth_screen.dart          # Login / Admin-Setup
+│       │   ├── user_management_screen.dart # Benutzer + Zuweisungen (Admin)
+│       │   ├── chat_screen.dart          # Chat mit Streaming
 │       │   ├── chat_list_screen.dart
 │       │   ├── provider_screen.dart
 │       │   └── tool_screen.dart
 │       └── widgets/
-│           ├── message_bubble.dart    # Markdown + Code
+│           ├── message_bubble.dart    # Markdown + Code + Reasoning-Block
 │           └── tool_call_widget.dart  # Tool-Call Anzeige
 ├── plugins/                    # Deine eigenen Plugins
 │   ├── providers/              # Eigene Provider (Volume-gemountet)
 │   └── tools/                  # Eigene Tools (Volume-gemountet)
-└── docker-compose.yml
+├── docker-compose.yml          # Full-Stack-Deployment
+└── README.md
 ```
+
+## API-Überblick (Auth)
+
+| Methode & Pfad | Zweck |
+|----------------|-------|
+| `GET /api/auth/status` | Muss noch ein Admin eingerichtet werden? |
+| `POST /api/auth/setup` | Einmalige Admin-Registrierung |
+| `POST /api/auth/login` | Anmeldung → JWT |
+| `GET /api/auth/me` | Aktueller Nutzer |
+| `GET/POST/DELETE /api/users` | Benutzerverwaltung (nur Admin) |
+| `PUT /api/users/{id}/providers` · `/tools` | Provider/Tools zuweisen (nur Admin) |
+
+REST-Aufrufe authentifizieren sich per `Authorization: Bearer <token>`.
 
 ## WebSocket Event-Protokoll
 
-Das Frontend kommuniziert mit dem Backend über WebSocket:
+Verbindung: `ws://<host>/ws/chat/{chat_id}?token=<jwt>` — der Token wird als Query-Parameter übergeben (WebSockets können keine Auth-Header setzen).
 
 | Event | Bedeutung |
 |-------|-----------|

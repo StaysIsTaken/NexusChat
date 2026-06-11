@@ -239,6 +239,34 @@ class ToolResult {
 }
 
 
+/// Benutzer (Auth)
+class AppUser {
+  final String id;
+  final String username;
+  final String role; // admin | user
+  final List<String> providerIds;
+  final List<String> toolIds;
+
+  const AppUser({
+    required this.id,
+    required this.username,
+    required this.role,
+    this.providerIds = const [],
+    this.toolIds = const [],
+  });
+
+  bool get isAdmin => role == 'admin';
+
+  factory AppUser.fromJson(Map<String, dynamic> json) => AppUser(
+        id: json['id'] as String,
+        username: json['username'] as String,
+        role: json['role'] as String? ?? 'user',
+        providerIds: List<String>.from(json['provider_ids'] as List? ?? []),
+        toolIds: List<String>.from(json['tool_ids'] as List? ?? []),
+      );
+}
+
+
 /// WebSocket-Event-Typen vom Backend
 enum WsEventType { token, toolStart, toolEnd, done, error }
 

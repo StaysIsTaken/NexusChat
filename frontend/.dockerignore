@@ -1,0 +1,18 @@
+# Build-Artefakte (werden im Image neu erzeugt)
+build/
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+
+# Plattform-Ordner für native Builds – fürs Web-Image nicht nötig
+windows/
+linux/
+macos/
+android/
+ios/
+
+# IDE / OS
+.idea/
+.vscode/
+*.iml
+.DS_Store

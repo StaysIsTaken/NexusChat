@@ -7,3 +7,5 @@ pydantic>=2.4.0
 python-multipart>=0.0.6
 websockets>=12.0
 sse-starlette>=1.8.0
+pyjwt>=2.8.0
+bcrypt>=4.1.0

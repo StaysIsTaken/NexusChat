@@ -18,12 +18,14 @@ class ChatScreen extends StatefulWidget {
   final String chatId;
   final ApiService api;
   final String backendUrl;
+  final String? token;
 
   const ChatScreen({
     super.key,
     required this.chatId,
     required this.api,
     required this.backendUrl,
+    this.token,
   });
 
   @override
@@ -42,7 +44,7 @@ class _ChatScreenState extends State<ChatScreen> {
 
   final TextEditingController _inputCtrl = TextEditingController();
   final ScrollController _scrollCtrl = ScrollController();
-  final WebSocketService _ws = WebSocketService();
+  late WebSocketService _ws; // gehört dem ChatSocketManager, nicht diesem Widget
   StreamSubscription? _wsSub;
 
   // Provider/Modell-Auswahl
@@ -97,13 +99,21 @@ class _ChatScreenState extends State<ChatScreen> {
   }
 
   void _connectWebSocket() {
-    _ws.connect(widget.backendUrl, widget.chatId);
+    // Persistente Verbindung über den Manager holen (überlebt Tab-Wechsel)
+    _ws = ChatSocketManager.instance.attach(widget.backendUrl, widget.chatId, token: widget.token);
     _wsSub = _ws.events.listen(_handleWsEvent, onError: (e) {
       if (mounted) {
         setState(() { _isStreaming = false; _sending = false; });
         _showError('WebSocket-Fehler: $e');
       }
     });
+    // Falls beim Zurückkehren noch ein Stream läuft: UI-Status angleichen
+    if (_ws.isStreaming) {
+      setState(() {
+        _isStreaming = true;
+        _sending = true;
+      });
+    }
   }
 
   void _handleWsEvent(WsEvent event) {
@@ -179,8 +189,26 @@ class _ChatScreenState extends State<ChatScreen> {
       }
     });
     _inputCtrl.clear();
+    _ensureConnected();
     _ws.sendMessage(content);
     _scrollToBottom();
+  }
+
+  /// Stellt vor dem Senden sicher, dass eine lebendige Verbindung besteht.
+  /// Hat der Manager den Socket zwischenzeitlich geschlossen, wird neu verbunden
+  /// und das Event-Abo erneuert.
+  void _ensureConnected() {
+    final svc = ChatSocketManager.instance.attach(widget.backendUrl, widget.chatId, token: widget.token);
+    if (!identical(svc, _ws)) {
+      _wsSub?.cancel();
+      _ws = svc;
+      _wsSub = _ws.events.listen(_handleWsEvent, onError: (e) {
+        if (mounted) {
+          setState(() { _isStreaming = false; _sending = false; });
+          _showError('WebSocket-Fehler: $e');
+        }
+      });
+    }
   }
 
   bool _listEquals(List<String> a, List<String> b) {
@@ -237,7 +265,9 @@ class _ChatScreenState extends State<ChatScreen> {
   @override
   void dispose() {
     _wsSub?.cancel();
-    _ws.dispose();
+    // Verbindung NICHT schließen – der Manager hält sie offen falls ein
+    // Stream läuft, damit die KI-Antwort beim Wegnavigieren nicht verloren geht.
+    ChatSocketManager.instance.detach(widget.chatId);
     _inputCtrl.dispose();
     _scrollCtrl.dispose();
     super.dispose();

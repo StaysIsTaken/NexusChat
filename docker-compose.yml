@@ -13,10 +13,12 @@ services:
       - CUSTOM_PROVIDERS_DIR=/app/providers/custom
       - CUSTOM_TOOLS_DIR=/app/tools/custom
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8099/health"]
+      # python:slim hat kein curl – Healthcheck über die mitgelieferte stdlib
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8099/health').status==200 else 1)"]
       interval: 30s
       timeout: 10s
-      retries: 3
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
   frontend:

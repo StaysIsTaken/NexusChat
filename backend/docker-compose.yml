@@ -7,9 +7,18 @@ services:
     volumes:
       # SQLite-DB bleibt bei Container-Neustart erhalten
       - nexuschat-data:/app/data
-      # Optional: eigene Provider/Tools ohne Rebuild einhängen
-      - ./providers/custom:/app/providers/custom
-      - ./tools/custom:/app/tools/custom
+      # Eigene Provider/Tools ohne Rebuild einhängen (gleiche Ordner wie Full-Stack-Compose)
+      - ../plugins/providers:/app/providers/custom
+      - ../plugins/tools:/app/tools/custom
+    environment:
+      - CUSTOM_PROVIDERS_DIR=/app/providers/custom
+      - CUSTOM_TOOLS_DIR=/app/tools/custom
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://localhost:8099/health').status==200 else 1)"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 20s
     restart: unless-stopped
 
 volumes:

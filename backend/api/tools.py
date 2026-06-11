@@ -18,8 +18,11 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import ToolServer, get_session
+from models import ToolServer, User, get_session
 from core.mcp_client import MCPClient
+from core.auth import (
+    can_use_tool, get_current_user, require_admin, user_tool_ids,
+)
 from tools.rest_tool import create_rest_tools
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -44,15 +47,24 @@ class ToolServerUpdate(BaseModel):
 
 
 @router.get("")
-async def list_tool_servers(db: AsyncSession = Depends(get_session)):
+async def list_tool_servers(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
+    """Admin sieht alle Tool-Server, normale Nutzer nur die zugewiesenen."""
     result = await db.execute(select(ToolServer).order_by(ToolServer.created_at))
     servers = result.scalars().all()
+    if user.role != "admin":
+        allowed = await user_tool_ids(db, user.id)
+        servers = [s for s in servers if s.id in allowed]
     return [s.to_dict() for s in servers]
 
 
 @router.post("", status_code=201)
 async def create_tool_server(
-    data: ToolServerCreate, db: AsyncSession = Depends(get_session)
+    data: ToolServerCreate,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_session),
 ):
     server = ToolServer(
         name=data.name,
@@ -70,11 +82,15 @@ async def create_tool_server(
 
 @router.get("/{server_id}")
 async def get_tool_server(
-    server_id: str, db: AsyncSession = Depends(get_session)
+    server_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
 ):
     server = await db.get(ToolServer, server_id)
     if not server:
         raise HTTPException(404, "Tool-Server nicht gefunden")
+    if not await can_use_tool(db, user, server_id):
+        raise HTTPException(403, "Kein Zugriff auf diesen Tool-Server.")
     return server.to_dict()
 
 
@@ -82,6 +98,7 @@ async def get_tool_server(
 async def update_tool_server(
     server_id: str,
     data: ToolServerUpdate,
+    _: User = Depends(require_admin),
     db: AsyncSession = Depends(get_session),
 ):
     server = await db.get(ToolServer, server_id)
@@ -98,7 +115,9 @@ async def update_tool_server(
 
 @router.delete("/{server_id}", status_code=204)
 async def delete_tool_server(
-    server_id: str, db: AsyncSession = Depends(get_session)
+    server_id: str,
+    _: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_session),
 ):
     server = await db.get(ToolServer, server_id)
     if not server:
@@ -109,12 +128,16 @@ async def delete_tool_server(
 
 @router.get("/{server_id}/tools")
 async def list_server_tools(
-    server_id: str, db: AsyncSession = Depends(get_session)
+    server_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
 ):
     """Listet alle verfügbaren Tools des Servers auf."""
     server = await db.get(ToolServer, server_id)
     if not server:
         raise HTTPException(404, "Tool-Server nicht gefunden")
+    if not await can_use_tool(db, user, server_id):
+        raise HTTPException(403, "Kein Zugriff auf diesen Tool-Server.")
 
     server_dict = server.to_dict()
     tools_info = []
@@ -156,12 +179,16 @@ async def list_server_tools(
 
 @router.post("/{server_id}/test")
 async def test_tool_server(
-    server_id: str, db: AsyncSession = Depends(get_session)
+    server_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
 ):
     """Testet die Verbindung zum Tool-Server."""
     server = await db.get(ToolServer, server_id)
     if not server:
         raise HTTPException(404, "Tool-Server nicht gefunden")
+    if not await can_use_tool(db, user, server_id):
+        raise HTTPException(403, "Kein Zugriff auf diesen Tool-Server.")
 
     if server.type == "mcp":
         client = MCPClient(

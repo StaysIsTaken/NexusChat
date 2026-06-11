@@ -29,9 +29,12 @@ from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from models import Chat, Message, Provider, ToolServer, get_session, async_session_maker
+from models import Chat, Message, Provider, ToolServer, User, get_session, async_session_maker
 from core.plugin_loader import get_provider
 from core.tool_caller import ToolCaller, load_active_tools
+from core.auth import (
+    authenticate_token, get_current_user, user_provider_ids, user_tool_ids,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -57,18 +60,26 @@ class ChatUpdate(BaseModel):
 
 
 @router.get("/api/chats")
-async def list_chats(db: AsyncSession = Depends(get_session)):
+async def list_chats(
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
     result = await db.execute(
-        select(Chat).order_by(Chat.updated_at.desc())
+        select(Chat).where(Chat.user_id == user.id).order_by(Chat.updated_at.desc())
     )
     chats = result.scalars().all()
     return [c.to_dict() for c in chats]
 
 
 @router.post("/api/chats", status_code=201)
-async def create_chat(data: ChatCreate, db: AsyncSession = Depends(get_session)):
+async def create_chat(
+    data: ChatCreate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
     chat = Chat(
         title=data.title or "Neues Gespräch",
+        user_id=user.id,
         provider_id=data.provider_id,
         model_name=data.model_name,
         active_tool_ids=data.active_tool_ids or [],
@@ -81,13 +92,17 @@ async def create_chat(data: ChatCreate, db: AsyncSession = Depends(get_session))
 
 
 @router.get("/api/chats/{chat_id}")
-async def get_chat(chat_id: str, db: AsyncSession = Depends(get_session)):
+async def get_chat(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
     """Gibt Chat inkl. vollständigem Nachrichtenverlauf zurück."""
     result = await db.execute(
         select(Chat).where(Chat.id == chat_id)
     )
     chat = result.scalar_one_or_none()
-    if not chat:
+    if not chat or chat.user_id != user.id:
         raise HTTPException(404, "Chat nicht gefunden")
 
     # Nachrichten separat laden – NIEMALS chat.messages = ... benutzen.
@@ -105,13 +120,28 @@ async def get_chat(chat_id: str, db: AsyncSession = Depends(get_session)):
 
 @router.put("/api/chats/{chat_id}")
 async def update_chat(
-    chat_id: str, data: ChatUpdate, db: AsyncSession = Depends(get_session)
+    chat_id: str,
+    data: ChatUpdate,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
 ):
     chat = await db.get(Chat, chat_id)
-    if not chat:
+    if not chat or chat.user_id != user.id:
         raise HTTPException(404, "Chat nicht gefunden")
 
-    for field, value in data.model_dump(exclude_none=True).items():
+    fields = data.model_dump(exclude_none=True)
+
+    # Nicht-Admins dürfen nur zugewiesene Provider/Tools setzen
+    if user.role != "admin":
+        if fields.get("provider_id"):
+            allowed_providers = await user_provider_ids(db, user.id)
+            if fields["provider_id"] not in allowed_providers:
+                raise HTTPException(403, "Kein Zugriff auf diesen Provider.")
+        if "active_tool_ids" in fields:
+            allowed = await user_tool_ids(db, user.id)
+            fields["active_tool_ids"] = [t for t in fields["active_tool_ids"] if t in allowed]
+
+    for field, value in fields.items():
         setattr(chat, field, value)
     chat.updated_at = datetime.utcnow()
 
@@ -121,9 +151,13 @@ async def update_chat(
 
 
 @router.delete("/api/chats/{chat_id}", status_code=204)
-async def delete_chat(chat_id: str, db: AsyncSession = Depends(get_session)):
+async def delete_chat(
+    chat_id: str,
+    user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_session),
+):
     chat = await db.get(Chat, chat_id)
-    if not chat:
+    if not chat or chat.user_id != user.id:
         raise HTTPException(404, "Chat nicht gefunden")
     await db.delete(chat)
     await db.commit()
@@ -143,7 +177,20 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
     und gibt Tool-Calls als strukturierte Events aus.
     """
     await websocket.accept()
-    logger.info(f"WebSocket verbunden: chat_id={chat_id}")
+
+    # Authentifizierung via Query-Parameter ?token=... (WS kann keine Header setzen)
+    token = websocket.query_params.get("token", "")
+    async with async_session_maker() as db:
+        auth_user = await authenticate_token(token, db) if token else None
+
+    if auth_user is None:
+        await websocket.send_json({"type": "error", "message": "Nicht angemeldet"})
+        await websocket.close(code=4401)
+        return
+
+    user_id = auth_user.id
+    user_role = auth_user.role
+    logger.info(f"WebSocket verbunden: chat_id={chat_id}, user={auth_user.username}")
 
     try:
         while True:
@@ -161,7 +208,9 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
 
             # Eigene Session für diesen Request (nicht WebSocket-lebendig)
             async with async_session_maker() as db:
-                await _handle_chat_message(websocket, db, chat_id, user_content)
+                await _handle_chat_message(
+                    websocket, db, chat_id, user_content, user_id, user_role
+                )
 
     except WebSocketDisconnect:
         logger.info(f"WebSocket getrennt: chat_id={chat_id}")
@@ -178,12 +227,14 @@ async def _handle_chat_message(
     db: AsyncSession,
     chat_id: str,
     user_content: str,
+    user_id: str,
+    user_role: str,
 ):
     """Verarbeitet eine eingehende Nachricht und streamt die Antwort."""
 
-    # Chat laden
+    # Chat laden + Besitz prüfen
     chat = await db.get(Chat, chat_id)
-    if not chat:
+    if not chat or chat.user_id != user_id:
         await websocket.send_json({"type": "error", "message": "Chat nicht gefunden"})
         return
 
@@ -220,6 +271,15 @@ async def _handle_chat_message(
         await websocket.send_json({"type": "error", "message": "Provider nicht verfügbar"})
         return
 
+    # Zugriffskontrolle: Nicht-Admins dürfen nur zugewiesene Provider nutzen
+    if user_role != "admin":
+        allowed_providers = await user_provider_ids(db, user_id)
+        if chat.provider_id not in allowed_providers:
+            await websocket.send_json(
+                {"type": "error", "message": "Kein Zugriff auf diesen Provider."}
+            )
+            return
+
     provider_instance = get_provider(provider_record.type, provider_record.to_dict())
     if not provider_instance:
         await websocket.send_json({"type": "error", "message": "Provider-Typ unbekannt"})
@@ -242,6 +302,24 @@ async def _handle_chat_message(
     tool_caller = ToolCaller(tools=active_tools)
     full_response = ""
     all_tool_calls = []
+
+    # Wenn der Client mitten im Stream wegnavigiert, bricht send_json ab.
+    # Wir wollen die Generierung trotzdem zu Ende führen und die Antwort
+    # speichern – damit sie beim Zurückkehren in den Chat geladen wird.
+    client_connected = True
+
+    async def safe_send(payload: dict) -> None:
+        nonlocal client_connected
+        if not client_connected:
+            return
+        try:
+            await websocket.send_json(payload)
+        except Exception:
+            client_connected = False
+            logger.info(
+                f"Client getrennt – Generierung läuft weiter und wird "
+                f"gespeichert (chat_id={chat_id})"
+            )
 
     async for event in tool_caller.run(
         conversation=conversation,
@@ -274,4 +352,4 @@ async def _handle_chat_message(
             chat.updated_at = datetime.utcnow()
             await db.commit()
 
-        await websocket.send_json(event)
+        await safe_send(event)
