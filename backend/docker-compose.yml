@@ -1,0 +1,16 @@
+services:
+  nexuschat-backend:
+    build: .
+    container_name: nexuschat-backend
+    ports:
+      - "8099:8099"
+    volumes:
+      # SQLite-DB bleibt bei Container-Neustart erhalten
+      - nexuschat-data:/app/data
+      # Optional: eigene Provider/Tools ohne Rebuild einhängen
+      - ./providers/custom:/app/providers/custom
+      - ./tools/custom:/app/tools/custom
+    restart: unless-stopped
+
+volumes:
+  nexuschat-data:
