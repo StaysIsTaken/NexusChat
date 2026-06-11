@@ -84,6 +84,8 @@ class _ChatScreenState extends State<ChatScreen> {
           _activeToolIds = List.from(chat.activeToolIds);
           _loading = false;
         });
+        // Direkt ans Ende springen (neueste Nachricht zuerst sichtbar)
+        _scrollToBottom(animate: false);
       }
     } catch (e) {
       if (mounted) setState(() => _loading = false);
@@ -308,14 +310,18 @@ class _ChatScreenState extends State<ChatScreen> {
     return true;
   }
 
-  void _scrollToBottom() {
+  void _scrollToBottom({bool animate = true}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
-      if (_scrollCtrl.hasClients) {
+      if (!_scrollCtrl.hasClients) return;
+      final target = _scrollCtrl.position.maxScrollExtent;
+      if (animate) {
         _scrollCtrl.animateTo(
-          _scrollCtrl.position.maxScrollExtent,
+          target,
           duration: const Duration(milliseconds: 200),
           curve: Curves.easeOut,
         );
+      } else {
+        _scrollCtrl.jumpTo(target);
       }
     });
   }
