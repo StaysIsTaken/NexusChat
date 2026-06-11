@@ -318,29 +318,43 @@ async def chat_websocket(websocket: WebSocket, chat_id: str):
 
             gen_task = asyncio.create_task(generate())
 
-            # Während generiert wird gleichzeitig auf 'stop' und 'tool_decision' hören
-            while not gen_task.done():
-                reader = asyncio.create_task(websocket.receive_text())
-                done, _ = await asyncio.wait(
-                    {gen_task, reader}, return_when=asyncio.FIRST_COMPLETED
-                )
-                if reader in done:
+            # Während generiert wird gleichzeitig auf 'stop' und 'tool_decision' hören.
+            # WICHTIG: immer nur EIN receive_text()-Task gleichzeitig – und einen
+            # abgebrochenen Reader vor dem nächsten receive_text() abwarten, sonst
+            # wirft websockets "cannot call recv while another coroutine is waiting".
+            reader = asyncio.create_task(websocket.receive_text())
+            try:
+                while not gen_task.done():
+                    done, _ = await asyncio.wait(
+                        {gen_task, reader}, return_when=asyncio.FIRST_COMPLETED
+                    )
+                    if reader in done:
+                        try:
+                            ctrl = json.loads(reader.result())
+                        except WebSocketDisconnect:
+                            client_gone.set()
+                            stop_event.set()
+                            await gen_task  # sauber beenden (speichert Teilantwort)
+                            raise
+                        except Exception:
+                            ctrl = None
+                        if isinstance(ctrl, dict):
+                            ct = ctrl.get("type")
+                            if ct == "stop":
+                                stop_event.set()
+                            elif ct == "tool_decision":
+                                decision_queue.put_nowait(bool(ctrl.get("approved")))
+                        # Neuen Reader nur starten wenn noch generiert wird
+                        if not gen_task.done():
+                            reader = asyncio.create_task(websocket.receive_text())
+            finally:
+                # Ausstehenden Reader abbrechen UND abwarten (Waiter sauber entfernen)
+                if not reader.done():
+                    reader.cancel()
                     try:
-                        ctrl = json.loads(reader.result())
-                    except WebSocketDisconnect:
-                        client_gone.set()
-                        stop_event.set()
-                        await gen_task  # Generierung sauber beenden (speichert Teilantwort)
-                        raise
-                    except Exception:
-                        continue
-                    ct = ctrl.get("type")
-                    if ct == "stop":
-                        stop_event.set()
-                    elif ct == "tool_decision":
-                        decision_queue.put_nowait(bool(ctrl.get("approved")))
-                else:
-                    reader.cancel()  # Generierung fertig → laufenden Read abbrechen
+                        await reader
+                    except BaseException:
+                        pass
 
             await gen_task  # eventuelle Exceptions propagieren
 
