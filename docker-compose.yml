@@ -1,0 +1,33 @@
+services:
+  backend:
+    build: ./backend
+    ports:
+      - "8099:8099"
+    volumes:
+      # SQLite-Daten persistent speichern
+      - nexuschat-data:/app/data
+      # Plugin-Verzeichnisse (ohne Image-Rebuild erweiterbar)
+      - ./plugins/providers:/app/providers/custom
+      - ./plugins/tools:/app/tools/custom
+    environment:
+      - CUSTOM_PROVIDERS_DIR=/app/providers/custom
+      - CUSTOM_TOOLS_DIR=/app/tools/custom
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8099/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+    restart: unless-stopped
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "3000:80"
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  nexuschat-data:
+    driver: local
